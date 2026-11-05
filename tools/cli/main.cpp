@@ -8,14 +8,23 @@
 // so the output can be compared byte for byte with an ffmpeg reference decode.
 //
 //   alphaclip play   <clip.webm> --out <raw.yuv> [--clock-step-us N] [--depth N]
-//                    [--realtime-speed N] [--wait-end] [--frames N] [--timeout-ms N]
+//                    [--realtime-speed N] [--wait-end] [--wait-queue-full] [--loop]
+//                    [--seek-us N] [--mid-seek-after N --mid-seek-us N]
+//                    [--frames N] [--timeout-ms N]
 //
 // `play` drives the threaded player (ac_start / ac_acquire_frame / ac_release_frame) with a
 // simulated clock that advances by --clock-step-us per iteration (or, with --realtime-speed N,
 // with the wall clock times N), writes each frame it is handed in the same raw layout as
 // `decode`, and prints one "frame pts_us=N" line per frame plus the player statistics.
-// --wait-end first waits until the decode thread has decoded the whole clip (needs
-// --depth >= the packet count), which makes the run deterministic.
+//   --wait-end         first wait until the decode thread has decoded the whole clip (needs
+//                      --depth >= the packet count): the run becomes deterministic
+//   --wait-queue-full  first wait until the queue is full (deterministic for the first
+//                      `depth` frames; works with --loop)
+//   --loop             ac_set_loop(1)
+//   --seek-us T        ac_seek(T) right after the start; the clock starts at T
+//   --mid-seek-after N --mid-seek-us T
+//                      after N frames were shown: ac_seek(T), restart the clock at T, and print
+//                      a "seek pts_us=T" line
 //
 // Exit codes: 0 ok, 1 error (message on stderr), 2 usage.
 #include <cerrno>
@@ -37,7 +46,9 @@ int Usage() {
                "  alphaclip info   <clip.webm>\n"
                "  alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N]\n"
                "  alphaclip play   <clip.webm> --out <raw.yuv> [--clock-step-us N] [--depth N]\n"
-               "                   [--realtime-speed N] [--wait-end] [--frames N] [--timeout-ms N]\n"
+               "                   [--realtime-speed N] [--wait-end] [--wait-queue-full] [--loop]\n"
+               "                   [--seek-us N] [--mid-seek-after N --mid-seek-us N]\n"
+               "                   [--frames N] [--timeout-ms N]\n"
                "  alphaclip --version\n");
   return 2;
 }
@@ -70,6 +81,7 @@ int CmdInfo(const char* path) {
   std::printf("packets: %lld\n", static_cast<long long>(info.packet_count));
   std::printf("duration_us: %lld\n", static_cast<long long>(info.duration_us));
   std::printf("fps: %.3f\n", static_cast<double>(info.fps));
+  std::printf("loop_period_us: %lld\n", static_cast<long long>(info.loop_period_us));
   ac_close(p);
   return 0;
 }
@@ -103,6 +115,12 @@ int CmdPlay(int argc, char** argv) {
   int64_t timeout_ms = 30000;
   int64_t realtime_speed = 0;  // 0: simulated clock; N >= 1: wall clock x N
   bool wait_end = false;
+  bool wait_queue_full = false;
+  bool loop = false;
+  bool do_seek = false;
+  int64_t seek_us = 0;
+  int64_t mid_seek_after = -1;  // seek once, after this many frames have been shown
+  int64_t mid_seek_us = 0;
   for (int i = 3; i < argc; ++i) {
     if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
       out_path = argv[++i];
@@ -120,11 +138,26 @@ int CmdPlay(int argc, char** argv) {
       }
     } else if (std::strcmp(argv[i], "--wait-end") == 0) {
       wait_end = true;
+    } else if (std::strcmp(argv[i], "--wait-queue-full") == 0) {
+      wait_queue_full = true;
+    } else if (std::strcmp(argv[i], "--loop") == 0) {
+      loop = true;
+    } else if (std::strcmp(argv[i], "--seek-us") == 0 && i + 1 < argc) {
+      if (!ParseInt64(argv[++i], &seek_us)) return Usage();
+      do_seek = true;
+    } else if (std::strcmp(argv[i], "--mid-seek-after") == 0 && i + 1 < argc) {
+      if (!ParseInt64(argv[++i], &mid_seek_after) || mid_seek_after < 0) return Usage();
+    } else if (std::strcmp(argv[i], "--mid-seek-us") == 0 && i + 1 < argc) {
+      if (!ParseInt64(argv[++i], &mid_seek_us)) return Usage();
     } else {
       return Usage();
     }
   }
   if (out_path == nullptr) return Usage();
+  if (loop && wait_end) {
+    std::fprintf(stderr, "error: --wait-end never finishes with --loop; use --wait-queue-full\n");
+    return 2;
+  }
 
   ac_player* p = nullptr;
   if (ac_open_file(path, nullptr, &p) != AC_OK) {
@@ -149,30 +182,42 @@ int CmdPlay(int argc, char** argv) {
   using Clock = std::chrono::steady_clock;
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   int rc = 0;
-  if (ac_set_queue_depth(p, static_cast<int32_t>(depth)) != AC_OK || ac_start(p) != AC_OK) {
+  if (ac_set_queue_depth(p, static_cast<int32_t>(depth)) != AC_OK || ac_set_loop(p, loop ? 1 : 0) != AC_OK ||
+      ac_start(p) != AC_OK) {
     std::fprintf(stderr, "error: %s\n", ac_last_error(p));
     rc = 1;
   }
-  if (rc == 0 && wait_end) {
+  if (rc == 0 && do_seek && ac_seek(p, seek_us) != AC_OK) {
+    std::fprintf(stderr, "error: %s\n", ac_last_error(p));
+    rc = 1;
+  }
+  if (rc == 0 && (wait_end || wait_queue_full)) {
     ac_stats st;
+    bool ready = false;
     do {
       ac_get_stats(p, &st);
-      if (st.reached_end) break;
+      ready = wait_end ? st.reached_end != 0 : (st.reached_end != 0 || st.frames_queued >= depth);
+      if (ready) break;
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (Clock::now() < deadline);
-    if (!st.reached_end) {
-      std::fprintf(stderr, "error: timed out waiting for the decode thread to finish\n");
+    if (!ready) {
+      std::fprintf(stderr, "error: timed out waiting for the decode thread\n");
       rc = 1;
     }
   }
 
-  int64_t clock_us = 0;
+  // The caller's clock: simulated (+step per iteration) or the wall clock x speed. It starts at
+  // the seek target, and a seek restarts it at the new target, as an engine would do.
+  int64_t clock_base = do_seek ? seek_us : 0;
+  int64_t clock_us = clock_base;
+  auto clock_epoch = Clock::now();
   int64_t frames = 0;
-  const auto clock_start = Clock::now();
+  bool mid_seek_done = false;
   while (rc == 0 && (max_frames < 0 || frames < max_frames)) {
     if (realtime_speed > 0) {
-      clock_us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - clock_start).count() *
-                 realtime_speed;
+      clock_us = clock_base +
+                 std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - clock_epoch).count() *
+                     realtime_speed;
     }
     if (Clock::now() >= deadline) {
       std::fprintf(stderr, "error: timed out after %lld frames\n", static_cast<long long>(frames));
@@ -192,6 +237,19 @@ int CmdPlay(int argc, char** argv) {
         break;
       }
       ++frames;
+      if (mid_seek_after >= 0 && !mid_seek_done && frames >= mid_seek_after) {
+        mid_seek_done = true;
+        std::printf("seek pts_us=%lld\n", static_cast<long long>(mid_seek_us));
+        if (ac_seek(p, mid_seek_us) != AC_OK) {
+          std::fprintf(stderr, "error: %s\n", ac_last_error(p));
+          rc = 1;
+          break;
+        }
+        clock_base = mid_seek_us;
+        clock_us = mid_seek_us;
+        clock_epoch = Clock::now();
+        continue;  // the clock restarts at the target; do not advance it this iteration
+      }
     } else if (s == AC_AGAIN) {
       // No sleep: Windows sleeps for 1-15 ms at least, which would make a free-running
       // run take far longer than the clip. Yielding keeps the decode thread running.

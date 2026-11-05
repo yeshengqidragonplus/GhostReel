@@ -123,6 +123,9 @@ std::unique_ptr<Clip> Clip::Open(const uint8_t* data, size_t size) {
   info.fps = frame_us > 0 ? 1e6 / static_cast<double>(frame_us) : 0.0;
   info.duration_us =
       idx.container_duration_us > 0 ? idx.container_duration_us : last + std::max<int64_t>(frame_us, 0);
+  info.first_pts_us = first;
+  // At least 1 ms so that a one-frame clip cannot make the loop spin without time advancing.
+  info.loop_period_us = std::max<int64_t>((last - first) + std::max<int64_t>(frame_us, 0), 1000);
 
   clip->ResetDecoders();
   return clip;

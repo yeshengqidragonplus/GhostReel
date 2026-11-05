@@ -29,6 +29,7 @@ struct ac_player {
   ac::FrameBuffer frame;       // the frame handed out by ac_decode_next
   std::string last_error;
   int depth = ac::Player::kDefaultDepth;
+  bool loop = false;           // applied when the player is created by ac_start
   const ac::FrameBuffer* acquired = nullptr;  // the frame the main thread holds (threaded mode)
   std::unique_ptr<ac::Player> player;
 };
@@ -169,6 +170,7 @@ ac_status ac_get_info(ac_player* player, ac_info* out) {
     out->fps = static_cast<float>(i.fps);
     out->has_alpha_plane = i.has_alpha ? 1 : 0;
     out->packet_count = static_cast<int64_t>(i.packet_count);
+    out->loop_period_us = i.loop_period_us;
     return AC_OK;
   });
 }
@@ -216,8 +218,18 @@ ac_status ac_start(ac_player* player) {
   return Guard(player, [&]() -> ac_status {
     if (!player->player) {
       player->player.reset(new ac::Player(std::move(player->clip), player->depth));
+      player->player->SetLoop(player->loop);
     }
     player->player->Start();  // throws AC_ERR_STATE if already started
+    return AC_OK;
+  });
+}
+
+ac_status ac_set_loop(ac_player* player, int32_t enable) {
+  if (player == nullptr) return Fail(nullptr, AC_ERR_ARG, "ac_set_loop: player is null");
+  return Guard(player, [&]() -> ac_status {
+    player->loop = enable != 0;
+    if (player->player) player->player->SetLoop(player->loop);
     return AC_OK;
   });
 }

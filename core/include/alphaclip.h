@@ -52,6 +52,7 @@ typedef struct ac_info {
   float fps;                     /* 0 when it cannot be determined */
   int32_t has_alpha_plane;       /* 1 when frames carry a 4th (A) plane */
   int64_t packet_count;          /* video packets in the file (hidden frames produce no output) */
+  int64_t loop_period_us;        /* pts added per loop pass: (last pts - first pts) + one frame */
 } ac_info;
 
 typedef struct ac_frame {
@@ -106,6 +107,16 @@ AC_API ac_status ac_decode_next(ac_player* player, ac_frame* out);
 AC_API ac_status ac_set_queue_depth(ac_player* player, int32_t depth);
 
 AC_API ac_status ac_start(ac_player* player);
+
+/*
+ * Loop playback (default off). When the decode thread reaches the end of the clip it
+ * restarts at the first frame and adds ac_info.loop_period_us to every following pts, so
+ * the caller's clock never has to jump back and AC_END is never returned. Takes effect at
+ * the next end of stream (it does not restart a stream that already ended: use ac_seek).
+ * A seek addresses a position inside one pass: it resets the pts offset to 0.
+ * May be called before or after ac_start.
+ */
+AC_API ac_status ac_set_loop(ac_player* player, int32_t enable);
 
 /*
  * Returns the newest queued frame with pts <= clock_us; older queued frames are

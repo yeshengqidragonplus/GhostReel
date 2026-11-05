@@ -246,6 +246,151 @@ def test_player(cli, work, clip, name, ref, pts, fsize):
 
     r = run([cli, "play", clip, "--out", out_path, "--depth", "4", "--wait-end"])
     check(r.returncode == 2, f"{name}: --wait-end with a too-small --depth is a usage error")
+    r = run([cli, "play", clip, "--out", out_path, "--loop", "--wait-end"])
+    check(r.returncode == 2, f"{name}: --loop with --wait-end is a usage error")
+
+    test_player_seek(cli, work, clip, name, ref, pts, fsize, frames_ok, out_path)
+    test_player_loop(cli, work, clip, name, ref, pts, fsize, frames_ok, out_path)
+
+
+def parse_events(stdout):
+    """[('frame', pts_us) | ('seek', target_us)] in the order the CLI printed them."""
+    ev = []
+    for line in stdout.splitlines():
+        if line.startswith("frame pts_us="):
+            ev.append(("frame", int(line.split("=", 1)[1])))
+        elif line.startswith("seek pts_us="):
+            ev.append(("seek", int(line.split("=", 1)[1])))
+    return ev
+
+
+def packet_for(pts, t):
+    """Index of the packet shown at time t: the latest with pts <= t, else the first."""
+    return max([i for i, p in enumerate(pts) if p <= t], default=0)
+
+
+def test_player_seek(cli, work, clip, name, ref, pts, fsize, frames_ok, out_path):
+    """ac_seek with the threaded player."""
+    n = len(pts)
+    # Deterministic: seek right after the start, whole clip pre-decoded, clock starts at the target.
+    # Exactly the frames from the packet shown at T onwards must come out, once each, in order.
+    targets = sorted({pts[0] - 5_000_000, pts[0], pts[n // 2] - 1, pts[n // 2], pts[n // 2] + 16_500,
+                      pts[-1], pts[-1] + 1_000_000})
+    for t in targets:
+        j = packet_for(pts, t)
+        r = run([cli, "play", clip, "--out", out_path, "--depth", "64", "--wait-end", "--seek-us", str(t),
+                 "--clock-step-us", "1000"])
+        shown, st = parse_play(r.stdout)
+        bad = frames_ok(shown) if r.returncode == 0 else r.stderr
+        check(r.returncode == 0 and shown == pts[j:] and bad is None and st.get("dropped") == "0",
+              f"{name}: player, seek {t} us -> frames from packet {j} on, none dropped",
+              bad or f"got {len(shown)} frames starting at {shown[:1]}, stats {st}")
+
+    # Free-running: seek while the decode thread is busy, forwards and backwards. After the seek no
+    # stale frame may appear: every later frame has pts >= the target packet's, strictly increasing,
+    # bytes correct, and the clip is still played to its last frame.
+    cases = [(10, pts[n * 3 // 4]), (n * 2 // 3, pts[n // 6]), (3, pts[0]), (n // 2, pts[-1]), (20, pts[n // 2])]
+    for depth in (1, 4):
+        problems = []
+        for after, target in cases:
+            for rep in range(2):
+                r = run([cli, "play", clip, "--out", out_path, "--depth", str(depth), "--realtime-speed", "10",
+                         "--mid-seek-after", str(after), "--mid-seek-us", str(target)])
+                if r.returncode != 0:
+                    problems.append(f"seek after {after} to {target}: exit {r.returncode & 0xFFFFFFFF:#x}: {r.stderr.strip()}")
+                    continue
+                ev = parse_events(r.stdout)
+                shown = [v for k, v in ev if k == "frame"]
+                bad = frames_ok(shown)
+                seek_at = next((i for i, (k, _) in enumerate(ev) if k == "seek"), None)
+                if bad:
+                    problems.append(f"seek after {after} to {target}: {bad}")
+                elif seek_at is None:
+                    problems.append(f"seek after {after} to {target}: the seek was never issued")
+                else:
+                    before = [v for k, v in ev[:seek_at] if k == "frame"]
+                    later = [v for k, v in ev[seek_at + 1:] if k == "frame"]
+                    j = packet_for(pts, target)
+                    if any(b <= a for a, b in zip(before, before[1:])) or any(b <= a for a, b in zip(later, later[1:])):
+                        problems.append(f"seek after {after} to {target}: pts not increasing within a segment")
+                    elif any(v < pts[j] for v in later):
+                        problems.append(f"seek after {after} to {target}: stale frame after the seek "
+                                        f"({min(later)} < {pts[j]})")
+                    elif not later or later[-1] != pts[-1]:
+                        problems.append(f"seek after {after} to {target}: the clip did not play on to its last frame")
+        check(not problems, f"{name}: player, seeking while the decode thread is busy, queue depth {depth}",
+              "; ".join(problems))
+
+
+def test_player_loop(cli, work, clip, name, ref, pts, fsize, frames_ok, out_path):
+    """ac_set_loop: the clock stays continuous across passes."""
+    n = len(pts)
+    info = parse_info(run([cli, "info", clip]).stdout)
+    period = int(info["loop_period_us"])
+    fps = float(info["fps"])
+    frame_us = round(1e6 / fps) if fps > 0 else 0
+    check(abs(period - ((pts[-1] - pts[0]) + frame_us)) <= 1000,
+          f"{name}: loop period is last-first plus one frame", f"{period} us")
+    if n > 64 or n < 5:
+        return
+
+    # Deterministic: queue pre-filled (64 frames), fine clock. A pass boundary must read
+    # ... last frame, first frame + period, second frame + period ...
+    k = 64 - n
+    want = pts + [period + pts[i] for i in range(k)]
+    r = run([cli, "play", clip, "--out", out_path, "--loop", "--depth", "64", "--wait-queue-full",
+             "--frames", "64", "--clock-step-us", "1000"])
+    shown, st = parse_play(r.stdout)
+    # frames_ok needs pts -> packet; map the shifted pts back for the byte check
+    mapped = [p if p in set(pts) else p - period for p in shown]
+    bad = frames_ok(mapped) if r.returncode == 0 else r.stderr
+    check(r.returncode == 0 and shown == want and bad is None and st.get("dropped") == "0",
+          f"{name}: loop, pass boundary: pts continue by one period, bytes identical, none dropped",
+          bad or f"got {shown[n - 2:n + 2]}")
+
+    # Seek to the last packet with looping on: offset resets to 0 for the seek, then grows by one
+    # period per pass: last frame, then pass 1 (+P), then pass 2 (+2P).
+    t = pts[-1]
+    full_passes = (64 - 1) // n
+    rest = (64 - 1) % n
+    want = [pts[-1]]
+    for q in range(1, full_passes + 1):
+        want += [q * period + p for p in pts]
+    want += [(full_passes + 1) * period + pts[i] for i in range(rest)]
+    r = run([cli, "play", clip, "--out", out_path, "--loop", "--depth", "64", "--wait-queue-full", "--seek-us",
+             str(t), "--frames", "64", "--clock-step-us", "1000"])
+    shown, st = parse_play(r.stdout)
+    pts_set = set(pts)
+    mapped = []
+    for p in shown:
+        q = (p - pts[0]) // period if p >= pts[0] else 0
+        mapped.append(p - q * period)
+    bad = frames_ok(mapped) if r.returncode == 0 else r.stderr
+    check(r.returncode == 0 and shown == want and bad is None,
+          f"{name}: loop after a seek to the last frame: offsets accumulate +P, +2P", bad or f"got {shown[:3]}...")
+
+    # Free-running, several passes: pts strictly increasing, each frame correct for its pass,
+    # and at least one pass boundary was crossed.
+    for depth in (1, 4):
+        problems = []
+        for rep in range(3):
+            r = run([cli, "play", clip, "--out", out_path, "--loop", "--depth", str(depth),
+                     "--realtime-speed", "20", "--frames", str(int(n * 2.6))])
+            shown, st = parse_play(r.stdout)
+            if r.returncode != 0:
+                problems.append(f"run {rep}: exit {r.returncode & 0xFFFFFFFF:#x}: {r.stderr.strip()}")
+                continue
+            passes = [(p - pts[0]) // period for p in shown]
+            mapped = [p - q * period for p, q in zip(shown, passes)]
+            bad = frames_ok(mapped)
+            if bad:
+                problems.append(f"run {rep}: {bad}")
+            elif any(b <= a for a, b in zip(shown, shown[1:])):
+                problems.append(f"run {rep}: pts not strictly increasing across passes")
+            elif max(passes) < 1:
+                problems.append(f"run {rep}: never crossed a pass boundary")
+        check(not problems, f"{name}: loop, free-running, queue depth {depth} (3 runs, ~2.6 passes)",
+              "; ".join(problems))
 
 
 def test_errors(cli, work, good_clip):

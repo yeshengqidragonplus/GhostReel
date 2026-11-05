@@ -45,7 +45,10 @@ Outcome Guarded(F&& f) noexcept {
 }  // namespace
 
 Player::Player(std::unique_ptr<Clip> clip, int depth)
-    : clip_(std::move(clip)), depth_(static_cast<size_t>(depth)) {
+    : clip_(std::move(clip)),
+      depth_(static_cast<size_t>(depth)),
+      first_pts_us_(clip_->info().first_pts_us),
+      loop_period_us_(clip_->info().loop_period_us) {
   pool_.resize(depth_ + 2);
   for (auto& slot : pool_) {
     slot.reset(new FrameBuffer());
@@ -86,6 +89,11 @@ void Player::Seek(int64_t pts_us) {
     error_text_.clear();
   }
   cv_decoder_.notify_one();
+}
+
+void Player::SetLoop(bool enable) {
+  std::lock_guard<std::mutex> g(m_);
+  loop_ = enable;
 }
 
 ac_status Player::Acquire(int64_t clock_us, const FrameBuffer** out, std::string* error_text) {
@@ -161,10 +169,14 @@ void Player::Run() {
         lk.unlock();
         const Outcome o = Guarded([&] { clip_->Seek(target); });
         lk.lock();
-        if (o.status != AC_OK && gen == generation_) {
-          failed_ = true;
-          error_status_ = o.status;
-          error_text_ = o.text;
+        if (gen == generation_) {
+          pts_offset_ = 0;  // a seek addresses a position inside one pass of the clip
+          pass_frames_ = 0;
+          if (o.status != AC_OK) {
+            failed_ = true;
+            error_status_ = o.status;
+            error_text_ = o.text;
+          }
         }
         continue;
       }
@@ -194,10 +206,32 @@ void Player::Run() {
         error_text_ = o.text;
       } else if (!got) {
         free_.push_back(slot);
-        eos_ = true;
+        if (loop_ && pass_frames_ > 0) {
+          // Next pass: restart at the first frame and keep the clock continuous by shifting
+          // every following pts by one period.
+          lk.unlock();
+          const Outcome r = Guarded([&] { clip_->Seek(first_pts_us_); });
+          lk.lock();
+          if (gen == generation_) {
+            if (r.status != AC_OK) {
+              failed_ = true;
+              error_status_ = r.status;
+              error_text_ = r.text;
+            } else {
+              pts_offset_ += loop_period_us_;
+              pass_frames_ = 0;
+            }
+          }
+        } else {
+          // Not looping, or a whole pass produced no frame at all (looping again would only
+          // spin): the stream has ended.
+          eos_ = true;
+        }
       } else {
+        slot->pts_us += pts_offset_;
         queue_.push_back(slot);
         ++stats_.frames_decoded;
+        ++pass_frames_;
       }
     }
   } catch (...) {

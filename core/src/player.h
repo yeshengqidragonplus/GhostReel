@@ -44,6 +44,9 @@ class Player {
 
   void Start();  // throws Failure(AC_ERR_STATE) when already started
   void Seek(int64_t pts_us);  // asynchronous: flushes the queue and clears a failure
+  // At the end of the stream: restart at the first frame and add one clip period to every
+  // following pts so the clock stays continuous. Takes effect at the next end of stream.
+  void SetLoop(bool enable);
 
   // Main thread only. Never blocks. On a failure status, *error_text receives the message.
   ac_status Acquire(int64_t clock_us, const FrameBuffer** out, std::string* error_text);
@@ -56,6 +59,8 @@ class Player {
 
   std::unique_ptr<Clip> clip_;  // touched only by the decode thread once started
   const size_t depth_;
+  const int64_t first_pts_us_;  // immutable copies of what the loop needs from the clip
+  const int64_t loop_period_us_;
 
   std::mutex m_;
   std::condition_variable cv_decoder_;  // wakes the decode thread: space, seek or stop
@@ -68,6 +73,9 @@ class Player {
   uint64_t generation_ = 0;         // bumped by Seek(): frames decoded before it are stale
   bool seek_pending_ = false;
   int64_t seek_target_ = 0;
+  bool loop_ = false;
+  int64_t pts_offset_ = 0;          // added to the pts of decoded frames: grows by one period per loop pass
+  int64_t pass_frames_ = 0;         // frames produced since the last seek / loop restart
   bool eos_ = false;                // the decode thread ran out of frames
   bool failed_ = false;             // the decode thread hit an error; Seek() recovers
   ac_status error_status_ = AC_OK;

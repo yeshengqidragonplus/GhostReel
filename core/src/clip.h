@@ -30,6 +30,10 @@ struct ClipInfo {
   double fps = 0;
   bool has_alpha = false;
   size_t packet_count = 0;
+  int64_t first_pts_us = 0;
+  // pts added to every frame of the next pass when looping: (last pts - first pts) plus one
+  // frame duration, so the last frame of a pass and the first of the next are one frame apart.
+  int64_t loop_period_us = 0;
 };
 
 class Clip {
