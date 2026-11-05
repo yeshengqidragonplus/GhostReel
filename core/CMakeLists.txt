@@ -52,3 +52,33 @@ endif()
 if(AC_BUILD_CLI)
   add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../tools/cli" "${CMAKE_BINARY_DIR}/tools_cli")
 endif()
+
+# The shared library the engine bindings load (alphaclip.dll). It exports only the ac_* functions
+# marked AC_API in include/alphaclip.h: everything else (libvpx, libwebm, libc++) stays hidden.
+option(AC_BUILD_SHARED "Build the shared library (alphaclip.dll)" ON)
+if(AC_BUILD_SHARED)
+  add_library(alphaclip_shared SHARED
+    src/api.cpp
+    src/clip.cpp
+    src/demuxer.cpp
+    src/player.cpp
+    src/vp9_decoder.cpp)
+  target_compile_definitions(alphaclip_shared PRIVATE AC_BUILDING_SHARED)
+  target_include_directories(alphaclip_shared
+    PUBLIC include
+    PRIVATE src "${AC_VPX_ROOT}")
+  target_link_libraries(alphaclip_shared PRIVATE ac_webm_parser "${AC_VPX_LIB}" Threads::Threads)
+  if(MSVC)
+    target_compile_options(alphaclip_shared PRIVATE /W4)
+  else()
+    target_compile_options(alphaclip_shared PRIVATE -Wall -Wextra)
+  endif()
+  if(WIN32)
+    set_target_properties(alphaclip_shared PROPERTIES PREFIX "" OUTPUT_NAME "alphaclip")
+  endif()
+  if(MINGW)
+    # Self-contained DLL: static libc++ / libgcc / winpthreads, so it needs no runtime DLLs next to it.
+    target_link_libraries(alphaclip_shared PRIVATE pthread)
+    target_link_options(alphaclip_shared PRIVATE -static)
+  endif()
+endif()

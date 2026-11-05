@@ -3,3 +3,21 @@ build/
 
 # regenerable by samples/m0/gen_test_clips.ps1 (13.5 MB of raw ground truth)
 samples/m0/*.gray
+
+# Unity test project: generated folders and IDE files
+bindings/unity/TestProject/Library/
+bindings/unity/TestProject/Temp/
+bindings/unity/TestProject/Logs/
+bindings/unity/TestProject/obj/
+bindings/unity/TestProject/UserSettings/
+bindings/unity/TestProject/MemoryCaptures/
+bindings/unity/TestProject/*.csproj
+bindings/unity/TestProject/*.sln
+bindings/unity/TestProject/*.slnx
+# the core DLL in the package is a build product (bindings/unity/scripts/sync_plugin_win64.sh);
+# so is the folder's .meta, which would otherwise point at a folder a fresh clone does not have
+bindings/unity/package/Runtime/Plugins/
+bindings/unity/package/Runtime/Plugins.meta
+# the demo scene copies the sample clip here (Create Demo Scene menu); not committed
+bindings/unity/TestProject/Assets/StreamingAssets/
+bindings/unity/TestProject/Assets/StreamingAssets.meta

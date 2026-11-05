@@ -1,4 +1,6 @@
 // The C ABI. This is the only place exceptions are caught: nothing may escape through it.
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -19,6 +21,27 @@
 #include "clip.h"
 #include "common.h"
 #include "player.h"
+
+// The structs below cross the ABI by value layout: the engine bindings (C# P/Invoke, GDExtension,
+// Cocos) declare the same layout by hand. Lock it here so that a change breaks the build instead
+// of silently corrupting memory. (64-bit targets only: Windows x86_64, Android arm64.)
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
+static_assert(sizeof(ac_info) == 48 && offsetof(ac_info, width) == 0 && offsetof(ac_info, height) == 4 &&
+                  offsetof(ac_info, content_w) == 8 && offsetof(ac_info, content_h) == 12 &&
+                  offsetof(ac_info, duration_us) == 16 && offsetof(ac_info, fps) == 24 &&
+                  offsetof(ac_info, has_alpha_plane) == 28 && offsetof(ac_info, packet_count) == 32 &&
+                  offsetof(ac_info, loop_period_us) == 40,
+              "ac_info layout changed: update every binding");
+static_assert(sizeof(ac_frame) == 72 && offsetof(ac_frame, plane) == 0 && offsetof(ac_frame, stride) == 32 &&
+                  offsetof(ac_frame, width) == 48 && offsetof(ac_frame, height) == 52 &&
+                  offsetof(ac_frame, pts_us) == 56 && offsetof(ac_frame, flags) == 64,
+              "ac_frame layout changed: update every binding");
+static_assert(sizeof(ac_stats) == 40 && offsetof(ac_stats, frames_decoded) == 0 &&
+                  offsetof(ac_stats, frames_acquired) == 8 && offsetof(ac_stats, frames_dropped) == 16 &&
+                  offsetof(ac_stats, decode_time_us) == 24 && offsetof(ac_stats, frames_queued) == 32 &&
+                  offsetof(ac_stats, reached_end) == 36,
+              "ac_stats layout changed: update every binding");
+#endif
 
 // Member order matters: `player` is declared last so it is destroyed first (its destructor joins
 // the decode thread, which reads `owned` through the clip it owns).

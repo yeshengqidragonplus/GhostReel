@@ -1,0 +1,56 @@
+# M2 笔记
+
+M2 = Unity 编辑器原型:Windows 编辑器里播放不透明视频,完成标准"画面正确、能循环、不泄漏"(设计文档 §11)。
+结论见 [m2-conclusion.md](m2-conclusion.md)(草稿)。本文记录 M2 里做的设计决定,以及它们相对设计文档 v0.2 的差异。
+
+## 代码布局
+
+```
+core/CMakeLists.txt, core/src/api.cpp   新增共享库目标 alphaclip_shared(alphaclip.dll,只导出 14 个 ac_* 函数)和 ABI 布局的 static_assert
+core/tests/test_shared_lib.py           从外面(ctypes)调用 DLL 的测试,78 项
+bindings/unity/package/                 UPM 包 com.alphaclip.video
+  Runtime/Native/AcNative.cs            P/Invoke 声明和带检查的包装;结构体布局与 C++ 的 static_assert 对应,运行时再校验一次
+  Runtime/AlphaClipPlayer.cs            播放组件
+  Runtime/AlphaClipRendererBinder.cs    把 Output 挂到 Renderer 上
+  Runtime/Resources/AlphaClip/YuvToRgb.shader
+  Editor/AlphaClipPluginSettings.cs     导入 alphaclip.dll 时设成 Editor + Win64 插件
+bindings/unity/TestProject/             测试和演示工程(Assets/Editor 的批处理测试、Assets/Scripts 的播放模式测试驱动、演示场景)
+bindings/unity/scripts/                 sync_plugin_win64.sh、run_editmode_tests.ps1
+```
+
+## 决定与差异(需要你知道)
+
+1. **Unity 版本:** 开发基线 2022.3.62f2(满足 Unity 官方说的 16 KB 页版本门槛 2022.3.56f1);用户实际在用 Unity 6000,所以同时在
+   本机的 6000.3.2f1 上验证升级兼容。验证用的是 `bindings/unity` 的**副本**:直接用 6000 打开仓库里的工程会就地升级工程文件。
+2. **画面输出是 RenderTexture,不是"每个渲染器自己画三个平面"。** 组件把 Y/U/V 传成 R8 纹理,用一个着色器 `Graphics.Blit` 到一张
+   RGBA 的 `RenderTexture`(`Output`),任何材质、相机、UI 把它当普通贴图。好处:着色器不依赖具体渲染管线和各种 UI 着色器;
+   以后 alpha(预乘)可以直接写进 Output 的 alpha 通道。代价:多一张 w×h×4 字节的贴图(640×360 是 0.9 MB,1080p 是 8 MB)和每个新帧一次全屏绘制。
+   设计文档 §4/§9 写的是"用着色器画出来",这里偏离了;若 M3 的基线显示这一遍绘制或这张贴图成问题,再改。
+3. **着色器是手写的 Unity 版本。** 设计要求"一份 GLSL ES 3.0 主源 + 生成脚本,各引擎版本由它生成"(§8.3);生成脚本还没有,M2 的 Unity 着色器就是将来要被生成的第一个变体,
+   文件头里记着这点。
+4. **纹理方向和色彩:**
+   - 平面按"第一行在上"上传,而 Unity 纹理的第一行是下边,所以着色器把 V 翻转(用相机渲染并与参考比对验证过方向)。
+   - Y/U/V 是 `R8`、线性(非 sRGB)、不带 mipmap;Y 点采样,U/V 双线性。
+   - **色度位置:** 默认"左对齐"(MPEG-2 / H.26x / VP9 的惯例,色度横向与偶数列亮度同位),在着色器里把色度查找右移 0.25 个色度像素;
+     也可选"居中"(朴素双线性假设的位置)。这是因为第一版用居中采样时,与 ffmpeg(左对齐)比较发现色度偏了半个亮度像素。
+   - **矩阵/范围:** BT.601 / BT.709、limited / full 现在是组件上的设置;码流里的色彩信息是"未指定"(M0 已确认),M4 起由 sidecar 提供。
+   - **Gamma / Linear 色彩空间:** 着色器有一个 `_LinearOutput` 参数,由 C# 按 `QualitySettings.activeColorSpace` 设置;Linear 下着色器输出线性值,
+     由硬件在写 sRGB 渲染目标时编码(`GL.sRGBWrite` 默认开启,文档也建议不要去切换它,而是把渲染目标建成正确的 sRGB/线性类型)。
+     sRGB→线性的转换自己写(Unity 文档没有确认 `UNITY_COLORSPACE_GAMMA` 这个宏,所以不依赖它)。
+5. **原生插件:** `alphaclip.dll` 由 llvm-mingw 构建,静态 libc++/libgcc/winpthreads,只依赖 KERNEL32 和 UCRT 的 api-ms-win-crt-*,
+   只导出 14 个 `ac_*`。**不提交**(构建产物),由 `sync_plugin_win64.sh` 拷进包;所以不提交它的 `.meta`,导入设置(仅 Editor + Win64)由
+   `AlphaClipPluginSettings` 在导入时用代码设置。结构体(`ac_info` 48、`ac_frame` 72、`ac_stats` 40 字节)的布局用 C++ `static_assert` 锁死,
+   C# 侧运行时再校验。
+6. **打开方式:** `OpenFile(path)`(编辑器和独立播放器)、`Open(byte[])`(拷进原生内存,核心不拷贝所以组件持有它直到 `ac_close` 之后才释放)、
+   `Open(TextAsset)`(`.bytes` 资源,资源包里的原始数据就是这么走的)。Android 的 StreamingAssets 在 APK 里,要用 UnityWebRequest 读字节再 `Open(byte[])`——留给 M3。
+7. **生命周期:** `OnDestroy` → `Close()`:先 `ac_close`(会 join 解码线程),再释放字节拷贝,再销毁贴图、材质、渲染纹理。`OnDisable` 不做事:Update 不再被调用,
+   核心的队列满了解码线程就会停下,CPU 占用接近零,所以没有单独做"后台暂停"(设计 §9.4 里要求的"应用进后台时暂停解码"留给真机阶段确认)。
+8. **时钟:** `Time.unscaledTimeAsDouble`。批处理模式的播放模式里,Unity 自己的两种时间不一致(`unscaledTimeAsDouble` 比 `realtimeSinceStartup` 快约 30%),
+   所以播放模式测试按引擎时钟验证节奏,不按墙上时钟。
+9. **验证方法的几条教训**(也写进了 CLAUDE.md):
+   - 编辑模式不发 `OnDestroy`,所以编辑模式测试显式 `Close()`,`OnDestroy` 路径由播放模式测试覆盖。
+   - `Process.PrivateMemorySize64` 在 Mono 里不动,用 Win32 `GetProcessMemoryInfo`;进程私有字节会受显卡驱动的延迟释放影响,单个 200 周期窗口里能摆动 ±150 MB 而没有趋势,
+     所以泄漏判据用精确的计数器(打开/关闭次数、Texture/RT/Material 对象数、Unity 分配器和图形驱动内存),进程私有字节只作粗略上限并取两个窗口里小的那个;
+     核心自己的堆由 `ctypes` 测试在 Unity 之外按周期检查(每周期不到 1 KB)。每条判据都有一个故意泄漏的对照来证明它会失败。
+   - `WaitForEndOfFrame` 在批处理模式里不会恢复。
+   - Windows PowerShell 5.1 在参数默认值里拿不到 `$PSScriptRoot`。
