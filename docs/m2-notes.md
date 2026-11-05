@@ -14,7 +14,8 @@ bindings/unity/package/                 UPM 包 com.alphaclip.video
   Runtime/AlphaClipRendererBinder.cs    把 Output 挂到 Renderer 上
   Runtime/Resources/AlphaClip/YuvToRgb.shader
   Editor/AlphaClipPluginSettings.cs     导入 alphaclip.dll 时设成 Editor + Win64 插件
-bindings/unity/TestProject/             测试和演示工程(Assets/Editor 的批处理测试、Assets/Scripts 的播放模式测试驱动、演示场景)
+bindings/unity/TestProject/             测试和演示工程(Assets/Editor 的批处理测试、Assets/Scripts 的播放模式测试驱动、演示场景、
+                                        Assets/Demo/UrpPipeline.asset 和 UrpRenderer.asset:切换到 URP 时用的管线资源;工程默认是内置管线 + Gamma)
 bindings/unity/scripts/                 sync_plugin_win64.sh、run_editmode_tests.ps1
 ```
 
@@ -47,7 +48,20 @@ bindings/unity/scripts/                 sync_plugin_win64.sh、run_editmode_test
    核心的队列满了解码线程就会停下,CPU 占用接近零,所以没有单独做"后台暂停"(设计 §9.4 里要求的"应用进后台时暂停解码"留给真机阶段确认)。
 8. **时钟:** `Time.unscaledTimeAsDouble`。批处理模式的播放模式里,Unity 自己的两种时间不一致(`unscaledTimeAsDouble` 比 `realtimeSinceStartup` 快约 30%),
    所以播放模式测试按引擎时钟验证节奏,不按墙上时钟。
-9. **验证方法的几条教训**(也写进了 CLAUDE.md):
+9. **URP(补测):**
+   - **包:** URP、Core RP、Shader Graph、universal-config 都是编辑器自带的内置包(`BuiltInPackages`),不需要下载。公开注册表里 URP 的版本列表只到 10.10.1
+     (14.x / 17.x 只随编辑器提供),所以不能靠查注册表找它们。2022.3 上它们依赖的 burst / mathematics / searcher,本机缓存里有更高的版本
+     (1.8.21 / 1.2.6 / 4.9.2),测试工程的清单里直接指定这几个版本;用"死代理"保险(`-OfflineGuard`)启动编辑器确认了没有联网。
+   - **6000.3.2f1 + URP 17.3.0 要下载** mathematics 1.3.2、collections 2.4.3、searcher 4.9.3、nuget.mono-cecil 1.11.4、test-framework.performance 3.0.3,
+     共约 3.75 MB(来源 `download.packages.unity.com`);burst 固定到缓存里的 1.8.21,避免 URP 依赖链要的 1.8.14(399 MB)。等用户同意再下。
+   - **`Graphics.Blit` 在 SRP 里的调用位置:** Unity 文档建议在 `RenderPipelineManager.endContextRendering` 之类的回调里调用。实测在 URP 14.0.12 上,
+     组件在 `Update()` 里直接调用(编辑模式测试里在渲染循环之外调用、播放模式里由 `Update` 调用)工作正常,画面与内置管线逐值一致;所以没有改成回调。
+     URP 17 / HDRP 没有验证,仍是已知风险。
+   - **材质属性:** URP 的着色器用 `_BaseMap`,内置用 `_MainTex`;`AlphaClipRendererBinder` 默认自动选(材质有 `_BaseMap` 就用它)。内置的 `Unlit/Texture` 在 URP 里也能画(没有 LightMode 的 pass 会被 URP 当 SRPDefaultUnlit 渲染)。
+   - **测试:** 运行脚本多了 `-Pipeline Builtin|URP`(按需切换工程并重启一次编辑器)和 `-OfflineGuard`;测试会校验当前管线;相机渲染 `Output` 的测试在 URP 下用两种材质(`Universal Render Pipeline/Unlit` 和内置 `Unlit/Texture`)。
+   - **测试里踩的两个坑:** 播放模式的"节奏"检查原先比较总耗时,结果切换色彩空间后的第一次启动因为着色器编译卡了 1.2 秒而失败一次,同样配置重跑两次都通过;
+     改成逐帧看"画面落后时钟多少"的中位数和 95 分位(17 ms / 32 ms),不受一次性卡顿影响。另外,运行脚本里局部变量 `$method` 覆盖了 `-Method` 参数(PowerShell 变量不区分大小写)。
+10. **验证方法的几条教训**(也写进了 CLAUDE.md):
    - 编辑模式不发 `OnDestroy`,所以编辑模式测试显式 `Close()`,`OnDestroy` 路径由播放模式测试覆盖。
    - `Process.PrivateMemorySize64` 在 Mono 里不动,用 Win32 `GetProcessMemoryInfo`;进程私有字节会受显卡驱动的延迟释放影响,单个 200 周期窗口里能摆动 ±150 MB 而没有趋势,
      所以泄漏判据用精确的计数器(打开/关闭次数、Texture/RT/Material 对象数、Unity 分配器和图形驱动内存),进程私有字节只作粗略上限并取两个窗口里小的那个;

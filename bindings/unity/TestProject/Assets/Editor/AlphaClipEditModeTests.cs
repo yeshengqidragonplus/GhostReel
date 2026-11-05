@@ -60,6 +60,9 @@ namespace AlphaClip.Tests
             Check(expect == null || QualitySettings.activeColorSpace.ToString() == expect,
                 "project colour space is " + (expect ?? "unchecked") + " (is " + QualitySettings.activeColorSpace + ")");
             Check(AlphaClipPlayer.NativeVersion().StartsWith("0."), "native core loads: " + AlphaClipPlayer.NativeVersion());
+            string expectPipeline = BatchTests.Arg("-acExpectPipeline");
+            Check(expectPipeline == null || BatchTests.ActivePipeline() == expectPipeline,
+                "render pipeline is " + (expectPipeline ?? "unchecked") + " (is " + BatchTests.ActivePipeline() + ")");
 
             string pairs = BatchTests.Arg("-acPairs");
             if (string.IsNullOrEmpty(pairs))
@@ -84,7 +87,11 @@ namespace AlphaClip.Tests
             PictureTest(first[0], first[1], ColorMatrix.BT601, false, ChromaSiting.Center, false);
 
             SourceTests(first[0], first[1]);
-            ConsumerTest(first[0], first[1]);
+            ConsumerTest(first[0], first[1], "Unlit/Texture");
+            if (BatchTests.ActivePipeline() == "URP")
+            {
+                ConsumerTest(first[0], first[1], "Universal Render Pipeline/Unlit");
+            }
             LeakTest(firstClip, 200, false);
         }
 
@@ -271,9 +278,9 @@ namespace AlphaClip.Tests
         /// Unlit/Texture shader into another target and compare with the reference. This goes through the sRGB read and
         /// write conversions of a Linear colour-space project.
         /// </summary>
-        private static void ConsumerTest(string clip, string rawPath)
+        private static void ConsumerTest(string clip, string rawPath, string shaderName)
         {
-            string name = Path.GetFileName(clip) + " via a camera and Unlit/Texture";
+            string name = Path.GetFileName(clip) + " via a camera and " + shaderName + " [" + BatchTests.ActivePipeline() + "]";
             var player = new GameObject("alphaclip-consumer").AddComponent<AlphaClipPlayer>();
             GameObject cameraGo = null, quad = null;
             RenderTexture target = null;
@@ -312,7 +319,9 @@ namespace AlphaClip.Tests
                 quad = GameObject.CreatePrimitive(PrimitiveType.Quad);
                 UnityEngine.Object.DestroyImmediate(quad.GetComponent<Collider>());
                 quad.transform.localScale = new Vector3((float)w / h, 1f, 1f);
-                material = new Material(Shader.Find("Unlit/Texture")) { mainTexture = player.Output };
+                Shader shader = Shader.Find(shaderName);
+                Check(shader != null, name + ": shader found");
+                material = new Material(shader) { mainTexture = player.Output };
                 quad.GetComponent<MeshRenderer>().sharedMaterial = material;
 
                 target = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
@@ -330,7 +339,7 @@ namespace AlphaClip.Tests
                     var png = new Texture2D(w, h, TextureFormat.RGBA32, false, true);
                     png.LoadRawTextureData(rgba);
                     png.Apply();
-                    File.WriteAllBytes(Path.Combine(snapshotDir, "consumer_" + Path.GetFileNameWithoutExtension(clip) + "_frame" + (shown - 1) + ".png"), png.EncodeToPNG());
+                    File.WriteAllBytes(Path.Combine(snapshotDir, "consumer_" + BatchTests.ActivePipeline() + "_" + shaderName.Replace("/", "_").Replace(" ", "") + "_" + Path.GetFileNameWithoutExtension(clip) + "_frame" + (shown - 1) + ".png"), png.EncodeToPNG());
                     UnityEngine.Object.DestroyImmediate(png);
                 }
             }

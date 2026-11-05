@@ -5,7 +5,8 @@ namespace AlphaClip
     /// <summary>
     /// Shows the picture of the <see cref="AlphaClipPlayer"/> on a Renderer: it sets the player's Output RenderTexture on the
     /// renderer's material through a MaterialPropertyBlock, so the material asset itself is never modified. Any shader with a
-    /// texture property works (Built-in "Unlit/Texture" and "Standard" use _MainTex; URP/Lit uses _BaseMap).
+    /// texture property works. By default the property is found automatically: _BaseMap (URP shaders) if the material has
+    /// it, otherwise _MainTex (Built-in "Unlit/Texture", "Standard", ...). Name one explicitly for custom shaders.
     /// For other targets (UI RawImage, your own code) read <see cref="AlphaClipPlayer.Output"/> directly.
     /// </summary>
     [DisallowMultipleComponent]
@@ -13,7 +14,8 @@ namespace AlphaClip
     public sealed class AlphaClipRendererBinder : MonoBehaviour
     {
         [SerializeField] private Renderer target;
-        [SerializeField] private string textureProperty = "_MainTex";
+        [Tooltip("Leave empty to use _BaseMap when the material has it, else _MainTex.")]
+        [SerializeField] private string textureProperty = "";
 
         private AlphaClipPlayer m_player;
         private MaterialPropertyBlock m_block;
@@ -36,9 +38,19 @@ namespace AlphaClip
             }
             m_block ??= new MaterialPropertyBlock();
             target.GetPropertyBlock(m_block);
-            m_block.SetTexture(textureProperty, output);   // a null Output (clip closed) clears the texture
+            m_block.SetTexture(ResolveProperty(), output);   // a null Output (clip closed) clears the texture
             target.SetPropertyBlock(m_block);
             m_bound = output;
+        }
+
+        private string ResolveProperty()
+        {
+            if (!string.IsNullOrEmpty(textureProperty))
+            {
+                return textureProperty;
+            }
+            Material material = target.sharedMaterial;
+            return material != null && material.HasProperty("_BaseMap") ? "_BaseMap" : "_MainTex";
         }
 
         private void OnDestroy()
@@ -46,7 +58,7 @@ namespace AlphaClip
             if (target != null && m_block != null)
             {
                 target.GetPropertyBlock(m_block);
-                m_block.SetTexture(textureProperty, Texture2D.blackTexture);
+                m_block.SetTexture(ResolveProperty(), Texture2D.blackTexture);
                 target.SetPropertyBlock(m_block);
             }
         }

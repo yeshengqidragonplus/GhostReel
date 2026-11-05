@@ -42,6 +42,19 @@ renderer.material.mainTexture = player.Output; // 或者给物体加 AlphaClipRe
 把 `Output` 通过 MaterialPropertyBlock 挂到一个 Renderer 上,不改材质资源。想用别的时钟(音频、时间线),自己调
 `Present(long clockUs)`,不要开 `Play()`。销毁物体(`OnDestroy`)或调 `Close()` 会停掉解码线程并释放所有原生和 GPU 资源。
 
+## 渲染管线
+
+`Output` 是普通的 `RenderTexture`,内置管线和 URP 都能用:
+
+- 内置管线:`Unlit/Texture`、`Standard` 等都用 `_MainTex`。
+- URP:`Universal Render Pipeline/Unlit`、`Lit` 用 `_BaseMap`;内置的 `Unlit/Texture` 在 URP 里也能画。
+- `AlphaClipRendererBinder` 默认自动找属性(材质有 `_BaseMap` 就用它,否则 `_MainTex`);自定义着色器可以在 `Texture Property` 里写名字。
+
+已在 **2022.3.62f2 + URP 14.0.12** 验证(见 `docs/m2-conclusion.md`);HDRP 和 Unity 6 上的 URP 17 还没有。
+测试工程里 `run_editmode_tests.ps1 -Pipeline URP` 会把工程切到 URP(`-Pipeline Builtin` 切回),`-OfflineGuard` 让编辑器在一个死代理后面启动,
+这样 Package Manager 想联网就会失败而不是悄悄下载。URP、Core RP、Shader Graph 是编辑器自带的内置包,不需要下载;
+2022.3 上它们依赖的 burst / mathematics / searcher 用的是本机缓存里的版本(测试工程清单里直接指定了版本)。
+
 ## 色彩设置(M4 起由 sidecar 提供)
 
 核心不从码流里读色彩信息(码流里是"未指定"),所以现在由组件的三个设置决定:
@@ -66,13 +79,14 @@ powershell -File bindings/unity/scripts/run_editmode_tests.ps1 -ColorSpace Linea
 powershell -File bindings/unity/scripts/run_editmode_tests.ps1 -Demo -SnapshotDir <目录>
 ```
 
-脚本会按需切换工程的色彩空间(要重启一次编辑器)。`-Unity` / `-Project` 可以指向别的编辑器和工程副本。
+脚本会按需切换工程的色彩空间和渲染管线(`-Pipeline Builtin|URP`,各要重启一次编辑器)。`-Unity` / `-Project` 可以指向别的编辑器和工程副本。
 核心 DLL 从外面调用的测试(不经过 Unity):`python -I core/tests/test_shared_lib.py ...`。
 
 ## 已知限制
 
 - 只有 Windows 编辑器;没有 Windows 播放器构建、Android、macOS(见设计文档里程碑)。
-- 只验证了内置渲染管线。URP/HDRP 需要装包(要下载),而且 Unity 文档说在 SRP 里 `Graphics.Blit` 要在
-  `RenderPipelineManager.endContextRendering` 之类的回调里调用,目前的 `Update()` 里直接调用在 SRP 下**没有验证过**。
+- 渲染管线:内置管线和 2022.3 上的 URP 14.0.12 验证过。Unity 文档说在 SRP 里 `Graphics.Blit` 应在
+  `RenderPipelineManager.endContextRendering` 之类的回调里调用;组件现在是在 `Update()` 里直接调用,在 URP 14.0.12 上实测正常
+  (编辑模式和播放模式),但 URP 17 / HDRP 没有验证,这条仍是已知风险。
 - 没有 alpha(M4)、没有音频、没有 sidecar 元数据(M4)。
 - StreamingAssets 路径用的是普通文件路径;Android 上 StreamingAssets 在 APK 里,要先用 UnityWebRequest 读出字节再 `Open(byte[])`(M3)。

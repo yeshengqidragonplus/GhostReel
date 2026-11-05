@@ -30,11 +30,18 @@ namespace AlphaClip.Tests
             Directory.CreateDirectory(Path.Combine(Application.dataPath, "Scenes"));
             Directory.CreateDirectory(Path.Combine(Application.dataPath, "Demo"));
 
+            // URP shaders for a URP project, the built-in unlit shader otherwise.
+            string shaderName = BatchTests.ActivePipeline() == "URP" ? "Universal Render Pipeline/Unlit" : "Unlit/Texture";
             var material = AssetDatabase.LoadAssetAtPath<Material>(MaterialPath);
             if (material == null)
             {
-                material = new Material(Shader.Find("Unlit/Texture"));
+                material = new Material(Shader.Find(shaderName));
                 AssetDatabase.CreateAsset(material, MaterialPath);
+            }
+            else if (material.shader == null || material.shader.name != shaderName)
+            {
+                material.shader = Shader.Find(shaderName);
+                EditorUtility.SetDirty(material);
             }
 
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
