@@ -12,6 +12,11 @@ For every clip it checks:
   * `decode --seek-us T` equals the ffmpeg frames from the packet shown at T onwards, for targets
     at the start, the middle, between frames, on every keyframe and one tick before it, and
     before / after the whole clip.
+  * the threaded player (`play`): with the whole clip pre-decoded and a fine clock every frame is
+    shown once, in order, none dropped; with coarse clocks exactly the frames an idealised
+    "newest due frame wins" model predicts are shown and the rest counted as dropped; free-running
+    on the wall clock with queue depths 1/2/4/16 gives increasing pts, correct bytes and
+    consistent counters; closing while the decode thread is busy does not hang.
 And, without ffmpeg: missing file, empty file, garbage, truncated file and bad usage all fail
 cleanly (exit code 1 or 2, no crash).
 """
@@ -135,6 +140,112 @@ def test_clip(cli, ffmpeg, ffprobe, work, clip):
         diff = first_difference(open(out_path, "rb").read(), ref[j * fsize:], w, h, alpha)
         ok = diff is None and int(info_out["first_pts_us"]) == pts[j]
         check(ok, label, diff or f"first_pts_us {info_out.get('first_pts_us')} != {pts[j]}")
+
+    if len(pts) <= 64:  # the --wait-end checks need the whole clip to fit in the queue
+        test_player(cli, work, clip, name, ref, pts, fsize)
+
+
+def parse_play(stdout):
+    """(list of pts_us from 'frame pts_us=N' lines, dict of 'key: value' statistics)."""
+    pts, stats = [], {}
+    for line in stdout.splitlines():
+        if line.startswith("frame pts_us="):
+            pts.append(int(line.split("=", 1)[1]))
+        elif ": " in line:
+            k, v = line.split(": ", 1)
+            stats[k.strip()] = v.strip()
+    return pts, stats
+
+
+def model_clock(pts, step):
+    """Idealised player with every frame already queued: which packet indices are returned,
+    and how many are dropped, for a clock t = 0, step, 2*step, ... (newest due frame wins)."""
+    returned, dropped, consumed, k = [], 0, 0, 0
+    while consumed < len(pts):
+        t = k * step
+        k += 1
+        due = [i for i in range(consumed, len(pts)) if pts[i] <= t]
+        if due:
+            j = due[-1]
+            dropped += j - consumed
+            returned.append(j)
+            consumed = j + 1
+    return returned, dropped
+
+
+def test_player(cli, work, clip, name, ref, pts, fsize):
+    """The threaded player (ac_start / ac_acquire_frame / ac_release_frame)."""
+    out_path = os.path.join(work, name + ".play.raw")
+    n = len(pts)
+    index_of = {p: i for i, p in enumerate(pts)}
+    if len(index_of) != n:
+        print(f"SKIP  {name}: duplicate timestamps, threaded checks need unique pts")
+        return
+
+    def frames_ok(shown):
+        data = open(out_path, "rb").read()
+        if len(data) != len(shown) * fsize:
+            return f"{len(data)} bytes for {len(shown)} frames"
+        for i, p in enumerate(shown):
+            j = index_of.get(p)
+            if j is None:
+                return f"unknown pts {p}"
+            if data[i * fsize:(i + 1) * fsize] != ref[j * fsize:(j + 1) * fsize]:
+                return f"frame #{i} (pts {p}) differs from the reference"
+        return None
+
+    # A. everything decoded first, fine clock: every frame exactly once, in order, nothing dropped
+    r = run([cli, "play", clip, "--out", out_path, "--depth", "64", "--wait-end", "--clock-step-us", "1000"])
+    shown, st = parse_play(r.stdout)
+    bad = frames_ok(shown) if r.returncode == 0 else r.stderr
+    check(r.returncode == 0 and shown == pts and bad is None and st.get("dropped") == "0",
+          f"{name}: player, fine clock: all {n} frames in order, byte-identical, none dropped", bad or str(st))
+    check(int(st.get("decode_time_us", "0")) > 0, f"{name}: player reports decode time")
+
+    # B. coarse clocks: the newest due frame wins and older ones are dropped, exactly as modelled
+    for step in (20_000, 33_333, 100_000, 250_000, 1_000_000):
+        r = run([cli, "play", clip, "--out", out_path, "--depth", "64", "--wait-end", "--clock-step-us", str(step)])
+        shown, st = parse_play(r.stdout)
+        want, want_dropped = model_clock(pts, step)
+        bad = frames_ok(shown) if r.returncode == 0 else r.stderr
+        ok = (r.returncode == 0 and shown == [pts[j] for j in want] and bad is None
+              and st.get("dropped") == str(want_dropped) and st.get("acquired") == str(len(want)))
+        check(ok, f"{name}: player, clock step {step} us: {len(want)} frames shown, {want_dropped} dropped",
+              bad or f"got {len(shown)} frames, stats {st}")
+
+    # C. free-running with a real decode thread and small queues (races show up here):
+    #    pts strictly increasing, each frame correct, accounting adds up, no hang.
+    #    The clock is the wall clock x 10 (a 2 s clip takes ~0.2 s); the decode thread cannot always
+    #    keep up, so frames may be dropped, which is fine here.
+    for depth in (1, 2, 4, 16):
+        problems = []
+        for rep in range(3):
+            r = run([cli, "play", clip, "--out", out_path, "--depth", str(depth), "--realtime-speed", "10"])
+            shown, st = parse_play(r.stdout)
+            if r.returncode != 0:
+                problems.append(f"run {rep}: exit {r.returncode & 0xFFFFFFFF:#x}: {r.stderr.strip()}")
+                continue
+            bad = frames_ok(shown)
+            if bad:
+                problems.append(f"run {rep}: {bad}")
+            elif any(b <= a for a, b in zip(shown, shown[1:])):
+                problems.append(f"run {rep}: pts not strictly increasing")
+            elif not shown or shown[-1] != pts[-1]:
+                problems.append(f"run {rep}: last frame is not the last packet")
+            elif int(st["decoded"]) != int(st["acquired"]) + int(st["dropped"]) or int(st["acquired"]) != len(shown):
+                problems.append(f"run {rep}: frame accounting is off: {st}")
+        check(not problems, f"{name}: player, free-running, queue depth {depth} (3 runs)", "; ".join(problems))
+
+    # D. closing with the decode thread still busy must not hang or crash
+    problems = []
+    for rep in range(10):
+        r = run([cli, "play", clip, "--out", out_path, "--depth", "4", "--realtime-speed", "10", "--frames", "2"])
+        if r.returncode != 0:
+            problems.append(f"run {rep}: exit {r.returncode & 0xFFFFFFFF:#x}: {r.stderr.strip()}")
+    check(not problems, f"{name}: closing early, decode thread busy (10 runs)", "; ".join(problems))
+
+    r = run([cli, "play", clip, "--out", out_path, "--depth", "4", "--wait-end"])
+    check(r.returncode == 2, f"{name}: --wait-end with a too-small --depth is a usage error")
 
 
 def test_errors(cli, work, good_clip):

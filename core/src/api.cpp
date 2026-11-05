@@ -18,12 +18,19 @@
 #include "alphaclip.h"
 #include "clip.h"
 #include "common.h"
+#include "player.h"
 
+// Member order matters: `player` is declared last so it is destroyed first (its destructor joins
+// the decode thread, which reads `owned` through the clip it owns).
 struct ac_player {
   std::vector<uint8_t> owned;  // file contents when opened with ac_open_file
-  std::unique_ptr<ac::Clip> clip;
+  std::unique_ptr<ac::Clip> clip;  // moved into `player` by ac_start
+  ac::ClipInfo info;
   ac::FrameBuffer frame;       // the frame handed out by ac_decode_next
   std::string last_error;
+  int depth = ac::Player::kDefaultDepth;
+  const ac::FrameBuffer* acquired = nullptr;  // the frame the main thread holds (threaded mode)
+  std::unique_ptr<ac::Player> player;
 };
 
 namespace {
@@ -88,6 +95,17 @@ void ReadAll(std::FILE* f, std::vector<uint8_t>* out) {
   out->resize(used);
 }
 
+void FillFrame(const ac::FrameBuffer& f, ac_frame* out) {
+  for (int i = 0; i < 4; ++i) {
+    out->plane[i] = f.plane[i].empty() ? nullptr : f.plane[i].data();
+    out->stride[i] = f.stride[i];
+  }
+  out->width = f.width;
+  out->height = f.height;
+  out->pts_us = f.pts_us;
+  out->flags = 0;
+}
+
 void CheckMeta(const char* meta_json) {
   if (meta_json != nullptr && meta_json[0] != '\0') {
     throw ac::Failure(AC_ERR_UNSUPPORTED,
@@ -109,6 +127,7 @@ ac_status ac_open_memory(const uint8_t* data, size_t len, const char* meta_json,
     CheckMeta(meta_json);
     std::unique_ptr<ac_player> p(new ac_player());
     p->clip = ac::Clip::Open(data, len);
+    p->info = p->clip->info();
     *out = p.release();
     return AC_OK;
   });
@@ -132,6 +151,7 @@ ac_status ac_open_file(const char* path, const char* meta_json, ac_player** out)
     std::fclose(f);
     if (p->owned.empty()) throw ac::Failure(AC_ERR_FORMAT, "the file is empty");
     p->clip = ac::Clip::Open(p->owned.data(), p->owned.size());
+    p->info = p->clip->info();
     *out = p.release();
     return AC_OK;
   });
@@ -140,7 +160,7 @@ ac_status ac_open_file(const char* path, const char* meta_json, ac_player** out)
 ac_status ac_get_info(ac_player* player, ac_info* out) {
   if (player == nullptr || out == nullptr) return Fail(player, AC_ERR_ARG, "ac_get_info: null argument");
   return Guard(player, [&]() -> ac_status {
-    const ac::ClipInfo& i = player->clip->info();
+    const ac::ClipInfo& i = player->info;
     out->width = i.width;
     out->height = i.height;
     out->content_w = i.width;
@@ -156,7 +176,11 @@ ac_status ac_get_info(ac_player* player, ac_info* out) {
 ac_status ac_seek(ac_player* player, int64_t pts_us) {
   if (player == nullptr) return Fail(nullptr, AC_ERR_ARG, "ac_seek: player is null");
   return Guard(player, [&]() -> ac_status {
-    player->clip->Seek(pts_us);
+    if (player->player) {
+      player->player->Seek(pts_us);  // asynchronous: the decode thread performs it
+    } else {
+      player->clip->Seek(pts_us);
+    }
     return AC_OK;
   });
 }
@@ -166,16 +190,86 @@ ac_status ac_decode_next(ac_player* player, ac_frame* out) {
     return Fail(player, AC_ERR_ARG, "ac_decode_next: null argument");
   }
   return Guard(player, [&]() -> ac_status {
-    ac::FrameBuffer& f = player->frame;
-    if (!player->clip->DecodeNext(&f)) return AC_END;
-    for (int i = 0; i < 4; ++i) {
-      out->plane[i] = f.plane[i].empty() ? nullptr : f.plane[i].data();
-      out->stride[i] = f.stride[i];
+    if (player->player) {
+      throw ac::Failure(AC_ERR_STATE, "ac_decode_next is not available after ac_start");
     }
-    out->width = f.width;
-    out->height = f.height;
-    out->pts_us = f.pts_us;
-    out->flags = 0;
+    if (!player->clip->DecodeNext(&player->frame)) return AC_END;
+    FillFrame(player->frame, out);
+    return AC_OK;
+  });
+}
+
+ac_status ac_set_queue_depth(ac_player* player, int32_t depth) {
+  if (player == nullptr) return Fail(nullptr, AC_ERR_ARG, "ac_set_queue_depth: player is null");
+  if (depth < 1 || depth > ac::Player::kMaxDepth) {
+    return Fail(player, AC_ERR_ARG, "ac_set_queue_depth: depth must be 1..64");
+  }
+  if (player->player) {
+    return Fail(player, AC_ERR_STATE, "ac_set_queue_depth: only allowed before ac_start");
+  }
+  player->depth = depth;
+  return AC_OK;
+}
+
+ac_status ac_start(ac_player* player) {
+  if (player == nullptr) return Fail(nullptr, AC_ERR_ARG, "ac_start: player is null");
+  return Guard(player, [&]() -> ac_status {
+    if (!player->player) {
+      player->player.reset(new ac::Player(std::move(player->clip), player->depth));
+    }
+    player->player->Start();  // throws AC_ERR_STATE if already started
+    return AC_OK;
+  });
+}
+
+ac_status ac_acquire_frame(ac_player* player, int64_t clock_us, ac_frame* out) {
+  if (player == nullptr || out == nullptr) {
+    return Fail(player, AC_ERR_ARG, "ac_acquire_frame: null argument");
+  }
+  return Guard(player, [&]() -> ac_status {
+    if (!player->player) {
+      throw ac::Failure(AC_ERR_STATE, "ac_acquire_frame: the player is not started");
+    }
+    const ac::FrameBuffer* f = nullptr;
+    std::string error_text;
+    const ac_status s = player->player->Acquire(clock_us, &f, &error_text);
+    if (s == AC_OK) {
+      player->acquired = f;
+      FillFrame(*f, out);
+    } else if (s != AC_AGAIN && s != AC_END) {
+      return Fail(player, s, error_text.c_str());
+    }
+    return s;
+  });
+}
+
+ac_status ac_release_frame(ac_player* player, ac_frame* frame) {
+  if (player == nullptr || frame == nullptr) {
+    return Fail(player, AC_ERR_ARG, "ac_release_frame: null argument");
+  }
+  return Guard(player, [&]() -> ac_status {
+    const ac::FrameBuffer* held = player->acquired;
+    if (!player->player || held == nullptr || frame->plane[0] != held->plane[0].data()) {
+      return Fail(player, AC_ERR_ARG, "ac_release_frame: this is not the acquired frame");
+    }
+    player->acquired = nullptr;
+    return player->player->Release(held);
+  });
+}
+
+ac_status ac_get_stats(ac_player* player, ac_stats* out) {
+  if (player == nullptr || out == nullptr) return Fail(player, AC_ERR_ARG, "ac_get_stats: null argument");
+  return Guard(player, [&]() -> ac_status {
+    std::memset(out, 0, sizeof(*out));
+    if (player->player) {
+      const ac::PlayerStats s = player->player->Stats();
+      out->frames_decoded = s.frames_decoded;
+      out->frames_acquired = s.frames_acquired;
+      out->frames_dropped = s.frames_dropped;
+      out->decode_time_us = s.decode_time_us;
+      out->frames_queued = s.frames_queued;
+      out->reached_end = s.reached_end ? 1 : 0;
+    }
     return AC_OK;
   });
 }

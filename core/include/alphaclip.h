@@ -5,9 +5,9 @@
  * Every function returns an ac_status; no exception ever crosses this boundary,
  * and malformed input must produce an error, never a crash.
  *
- * M1 status: open / info / seek / synchronous decode are implemented.
- * The threaded player (ac_start / ac_acquire_frame / ac_release_frame) arrives
- * later in M1; see docs/ and the design document, section 7.
+ * M1 status: open / info / seek / synchronous decode / threaded player are
+ * implemented; looping arrives with M1.4. See docs/m1-notes.md and the design
+ * document, section 7.
  */
 #ifndef ALPHACLIP_H
 #define ALPHACLIP_H
@@ -81,7 +81,9 @@ AC_API ac_status ac_get_info(ac_player* player, ac_info* out);
  * Positions the stream so that the next frame is the one shown at `pts_us`: the
  * latest packet with pts <= pts_us (the first packet when pts_us is earlier). Decoding
  * restarts at the closest earlier keyframe and the frames before the target are
- * discarded. Valid in synchronous mode.
+ * discarded. In synchronous mode it takes effect immediately; with the threaded player it
+ * returns at once, flushes the queue (those frames count as dropped) and clears a decode
+ * failure; new frames appear as the decode thread catches up.
  */
 AC_API ac_status ac_seek(ac_player* player, int64_t pts_us);
 
@@ -89,9 +91,45 @@ AC_API ac_status ac_seek(ac_player* player, int64_t pts_us);
  * Synchronous decode for tools and tests: decodes the next shown frame in stream
  * order, with no thread and no clock. Returns AC_END after the last frame.
  * The frame stays valid until the next ac_decode_next / ac_seek / ac_close on
- * this player. Not thread-safe; do not mix with the threaded player.
+ * this player. Not thread-safe. Returns AC_ERR_STATE once ac_start was called.
  */
 AC_API ac_status ac_decode_next(ac_player* player, ac_frame* out);
+
+/* ---- Threaded player ------------------------------------------------------
+ *
+ * ac_start launches one decode thread that demuxes + decodes into a bounded
+ * queue of ready frames. The caller's thread (the "main" thread; all calls
+ * below must come from one thread at a time) polls with ac_acquire_frame.
+ */
+
+/* Number of decoded frames the queue may hold. 1..64, default 4. Only before ac_start. */
+AC_API ac_status ac_set_queue_depth(ac_player* player, int32_t depth);
+
+AC_API ac_status ac_start(ac_player* player);
+
+/*
+ * Returns the newest queued frame with pts <= clock_us; older queued frames are
+ * dropped. The clock is supplied by the caller (engine time, audio clock...).
+ *   AC_OK     a frame is returned; give it back with ac_release_frame before the next acquire
+ *   AC_AGAIN  nothing newer is due yet: keep showing the previous frame
+ *   AC_END    the stream is finished and every frame has been consumed
+ *   other     the decode thread failed (AC_ERR_DECODE ...); ac_last_error has the text.
+ *             ac_seek clears the failure.
+ * Never blocks.
+ */
+AC_API ac_status ac_acquire_frame(ac_player* player, int64_t clock_us, ac_frame* out);
+AC_API ac_status ac_release_frame(ac_player* player, ac_frame* frame);
+
+typedef struct ac_stats {
+  int64_t frames_decoded;      /* frames the decode thread produced */
+  int64_t frames_acquired;     /* frames handed out by ac_acquire_frame */
+  int64_t frames_dropped;      /* produced but never shown: older than the clock, or flushed by a seek */
+  int64_t decode_time_us;      /* total time the decode thread spent decoding (excludes waiting) */
+  int32_t frames_queued;       /* frames waiting in the queue right now */
+  int32_t reached_end;         /* 1 once the decode thread has no more frames to produce */
+} ac_stats;
+
+AC_API ac_status ac_get_stats(ac_player* player, ac_stats* out);
 
 /*
  * Human-readable text of the most recent failure. With a player: that player's

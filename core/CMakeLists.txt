@@ -26,15 +26,19 @@ target_include_directories(ac_webm_parser
   PUBLIC "${AC_WEBM_ROOT}/webm_parser/include"
   PRIVATE "${AC_WEBM_ROOT}/webm_parser")
 
+find_package(Threads REQUIRED)
 add_library(alphaclip_core STATIC
   src/api.cpp
   src/clip.cpp
   src/demuxer.cpp
+  src/player.cpp
   src/vp9_decoder.cpp)
 target_include_directories(alphaclip_core
   PUBLIC include
   PRIVATE src "${AC_VPX_ROOT}")
-target_link_libraries(alphaclip_core PRIVATE ac_webm_parser PUBLIC "${AC_VPX_LIB}")
+target_link_libraries(alphaclip_core
+  PRIVATE ac_webm_parser
+  PUBLIC "${AC_VPX_LIB}" Threads::Threads)
 if(MSVC)
   target_compile_options(alphaclip_core PRIVATE /W4)
 else()

@@ -9,7 +9,7 @@ M1 = 核心库 + 命令行小工具,完成标准:与 ffmpeg 参考输出逐帧�
 |---|---|---|
 | M1.1 | 骨架:CMake、`alphaclip.h`、demux 建包索引、`info` 命令 | 完成 |
 | M1.2 | VP9 解码(两个解码器)、`decode` 命令、对 ffmpeg 逐字节比对、seek | 完成,43/43 项检查通过 |
-| M1.3 | 解码线程、环形队列、`ac_acquire_frame` / `ac_release_frame` | 未开始 |
+| M1.3 | 解码线程、有界队列、`ac_acquire_frame` / `ac_release_frame`、统计 | 完成,69/69 项检查通过 + 150 次压力运行无异常 |
 | M1.4 | 循环(`seek(0)` + pts 偏移)、线程化播放器里的 seek | 未开始 |
 | M1.5 | 畸形输入加固与模糊测试、Android arm64 构建并在 Pixel 6a 上跑 | 未开始 |
 
@@ -21,6 +21,7 @@ core/src/api.cpp           C ABI 实现;唯一捕获异常的地方
 core/src/clip.{h,cpp}      解析后的片子 + 同步解码、seek
 core/src/demuxer.{h,cpp}   libwebm webm_parser:扫描整个文件,建包索引
 core/src/vp9_decoder.*     libvpx 的薄封装;native_alpha 用两个实例
+core/src/player.{h,cpp}    线程化播放器:一个解码线程 + 有界队列
 core/src/common.h          上限常量、内部错误类型 ac::Failure
 tools/cli/main.cpp         alphaclip info / decode
 core/tests/                test_vs_ffmpeg.py
@@ -52,6 +53,18 @@ core/scripts/              build_libvpx_win64.sh、build_core_win64.sh
    我们在解码后才能检查尺寸,所以一个被篡改的帧头仍可能让 libvpx 先分配一大块内存。对第一方素材不是问题,
    对不可信文件需要后续加固(M1.5 评估)。
 
+6. **线程化播放器(M1.3)的语义**,在设计 §7.3 的基础上定下来的细节:
+   - `ac_acquire_frame(clock)` 返回队列里 `pts <= clock` 的**最新**一帧,更早的算丢帧;从不阻塞。
+     没有到期的帧时返回 `AC_AGAIN`("继续显示上一帧");流结束且队列取空返回 `AC_END`;解码线程出错且队列取空时返回错误码(`ac_seek` 清除)。
+   - 同一时刻只能持有一帧:取下一帧前必须 `ac_release_frame`,否则 `AC_ERR_STATE`。
+   - 帧缓冲池固定为 `depth + 2` 个(最多 `depth` 个在队列里、1 个在主线程手上、1 个在解码线程手上),队列深度默认 4,
+     `ac_set_queue_depth` 可调(1..64,只能在 `ac_start` 之前)。
+   - 线程运行期间**只有解码线程碰 Clip**;`ac_seek` 只是提交请求并清空队列(被清掉的帧计入丢帧),由解码线程执行,
+     用"代数"丢弃解码途中已过时的帧。调用 `ac_start` 之后 `ac_decode_next` 返回 `AC_ERR_STATE`。
+   - 新增 `ac_get_stats`:解码帧数、取走帧数、丢帧数、解码线程累计解码耗时(不含等待)、队列长度、是否已到末尾。
+     设计 NFR-1 要的"解码 ms/帧、掉帧率"就是从这里来;M3 的性能基线直接用它。
+   - 解码线程里的所有异常都在线程内转成错误状态,不会因为线程函数抛异常而终止进程。
+
 ## 构建与测试
 
 ```bash
@@ -67,3 +80,12 @@ python -I core/tests/test_vs_ffmpeg.py --cli build/core-win64/bin/alphaclip.exe 
 测试脚本用 ffmpeg(`-c:v libvpx-vp9`,放在 `-i` 之前)独立解码出参考输出,用 ffprobe 读出每个包的时间戳和关键帧标志;
 检查 `info`、全部帧逐字节一致、在片头/片中/帧间/每个关键帧及其前一刻/片尾之外的 seek、以及缺文件、空文件、随机字节、
 截断文件、错误用法都干净地失败。Windows 下 Python 的 `subprocess` 需要绝对路径,脚本里已处理。
+
+线程化播放器用 `alphaclip play` 测:
+- 先等解码线程解完整个片子(`--wait-end`,队列深度 ≥ 包数),再用 1 ms 步进的时钟取帧:每帧恰好一次、按序、逐字节一致、0 丢帧。
+- 粗时钟(20 ms、33.333 ms、100 ms、250 ms、1 s 步进):取出的帧和丢帧数必须与一个"最新到期帧优先"的理想模型完全一致。
+- 自由运行(真实解码线程,墙上时钟 ×10)在队列深度 1/2/4/16 下:pts 严格递增、字节正确、`decoded == acquired + dropped`、不挂死。
+- 解码线程仍在忙时提前关闭,不挂死、不崩溃。
+- 另有一轮压力运行(队列深度 1/2/3/4/8/64 × 时钟速度 1/5/20/100/1000 × 5 次 = 150 次),都无异常。
+  没有 ThreadSanitizer 可用(llvm-mingw 不带),所以数据竞争只能靠这类测试和代码审查,不能算被证明。
+- Windows 的 `sleep_for` 粒度是 1–15 ms:CLI 的自由运行模式因此用 `yield` 而不是睡眠,时钟用墙上时钟乘以倍数。
