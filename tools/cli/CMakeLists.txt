@@ -1,0 +1,12 @@
+add_executable(alphaclip main.cpp)
+target_link_libraries(alphaclip PRIVATE alphaclip_core)
+target_compile_features(alphaclip PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(alphaclip PRIVATE /W4)
+else()
+  target_compile_options(alphaclip PRIVATE -Wall -Wextra)
+endif()
+if(MINGW)
+  # No stray runtime DLLs next to the exe.
+  target_link_options(alphaclip PRIVATE -static)
+endif()

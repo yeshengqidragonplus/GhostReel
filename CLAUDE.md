@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0 is complete** (conclusion finalized 2026-11-05; committed locally in the first commit, not pushed; M1 has not started). The design document [plans/alphaclip-requirements-and-design.md](plans/alphaclip-requirements-and-design.md) (Chinese, draft v0.2, revised 2026-11-05 from the M0 findings) is the source of truth for requirements, architecture and milestones; read it before doing anything. The final M0 conclusion is [docs/m0-conclusion.md](docs/m0-conclusion.md) — read it too; the design doc (v0.2) already folds its corrections in (§7.1 parser choice, alpha cost, risks R2/R10); where the two differ, the conclusion has the evidence.
+**M0 is complete** (conclusion finalized 2026-11-05) and **M1 (core library + CLI) is in progress** — progress, design decisions and deviations from the design doc are in [docs/m1-notes.md](docs/m1-notes.md); read it before touching `core/src/`. Commits are local; nothing has been pushed. The design document [plans/alphaclip-requirements-and-design.md](plans/alphaclip-requirements-and-design.md) (Chinese, draft v0.2, revised 2026-11-05 from the M0 findings) is the source of truth for requirements, architecture and milestones; read it before doing anything. The final M0 conclusion is [docs/m0-conclusion.md](docs/m0-conclusion.md) — read it too; the design doc (v0.2) already folds its corrections in (§7.1 parser choice, alpha cost, risks R2/R10); where the two differ, the conclusion has the evidence.
 
-M0 status: Windows toolchain installed and verified; **`native_alpha` is feasible** (libwebm `webm_parser` + two libvpx decoders, bit-exact vs ffmpeg). Android arm64 also compiles with NDK r30 (empty C++17 `.so`, libvpx cross-built with NEON, and the probe; all ELF LOAD segments are 16 KB-aligned), and the probe was **run on the Pixel 6a** (Android 15, 4 KB pages) with the user's go-ahead: bit-exact vs ffmpeg and vs the Windows plain-C build, keyframe seek and clean failure from a non-keyframe both OK. What M0 did not cover (NEON-vs-C comparison on the same device, real footage, other resolutions/SoCs, multithread, memory, container-level seek) is in the conclusion's hand-off table; none of it blocks M1. The only code is the throwaway spikes in `core/spikes/` (`m0_alpha_probe/`, `m0_empty_lib/`); there is no real core library yet.
+M0 status: Windows toolchain installed and verified; **`native_alpha` is feasible** (libwebm `webm_parser` + two libvpx decoders, bit-exact vs ffmpeg). Android arm64 also compiles with NDK r30 (empty C++17 `.so`, libvpx cross-built with NEON, and the probe; all ELF LOAD segments are 16 KB-aligned), and the probe was **run on the Pixel 6a** (Android 15, 4 KB pages) with the user's go-ahead: bit-exact vs ffmpeg and vs the Windows plain-C build, keyframe seek and clean failure from a non-keyframe both OK. What M0 did not cover (NEON-vs-C comparison on the same device, real footage, other resolutions/SoCs, multithread, memory, container-level seek) is in the conclusion's hand-off table; none of it blocks M1. `core/spikes/` (`m0_alpha_probe/`, `m0_empty_lib/`) is throwaway M0 code; the real core library is `core/{include,src}` plus the CLI in `tools/cli/`.
 
 ### Toolchain (installed in M0; nothing is on the system PATH)
 
@@ -20,7 +20,16 @@ Build + run the spike (from Git Bash; builds libvpx v1.17.0 decoder-only, then t
 sh core/spikes/m0_alpha_probe/build_win.sh
 ```
 
-Android arm64 (Git Bash, repo root; the second script needs the first one's output):
+The real core library and CLI (M1), Windows:
+
+```bash
+sh core/scripts/build_core_win64.sh      # builds libvpx if needed, then core + CLI -> build/core-win64/bin/alphaclip.exe
+python -I core/tests/test_vs_ffmpeg.py --cli build/core-win64/bin/alphaclip.exe --ffmpeg-dir E:/Tools/ffmpeg-9.0.2-full_build/bin --workdir <empty dir> samples/m0/alpha_native.webm samples/m0/opaque.webm
+```
+
+Python's `subprocess` on Windows needs absolute exe paths (`dir/exe` with forward slashes fails in CreateProcess).
+
+Android arm64 spikes (Git Bash, repo root; the second script needs the first one's output):
 
 ```bash
 sh core/spikes/m0_empty_lib/build_android_arm64.sh                # empty C++17 .so + llvm-readelf 16 KB alignment check
@@ -63,11 +72,11 @@ Rendering contract: planes are single-channel `R8` textures (U/V at half resolut
 
 ### File format (self-designed, v0.1)
 
-The `.webm` is always a plain standard VP9 file playable anywhere. Alpha/color parameters live in same-named sidecars: `clip.acmeta.json` (required even for `opaque`; versioned via `schema`, and the core rejects unknown versions), plus `clip.aclut.png` for `keyed`. Field names may change after M1; the core's schema validation is authoritative. The authoring tool must write WebM **Cues** (otherwise seek is slow or fails).
+The `.webm` is always a plain standard VP9 file playable anywhere. Alpha/color parameters live in same-named sidecars: `clip.acmeta.json` (required even for `opaque`; versioned via `schema`, and the core rejects unknown versions), plus `clip.aclut.png` for `keyed`. Field names may change after M1; the core's schema validation is authoritative. The authoring tool should still write WebM **Cues** (other players need them to seek), but the M1 core builds a full packet index at open and does not depend on them (see `docs/m1-notes.md`).
 
 ## Working rules specific to this project
 
-- **Work milestone by milestone** (M0–M10, §11); each step must be independently verifiable and stoppable. Do only the milestone the user asked for. **M0** (toolchain setup + libvpx WebM-alpha feasibility, *no engine bindings*) is finished and its conclusion is final; **M1** (core library + command-line tool, frame-exact vs ffmpeg) is next but starts only when the user asks for it.
+- **Work milestone by milestone** (M0–M10, §11); each step must be independently verifiable and stoppable. Do only the milestone the user asked for. **M0** (toolchain setup + libvpx WebM-alpha feasibility, *no engine bindings*) is finished and its conclusion is final; **M1** (core library + command-line tool, frame-exact vs ffmpeg) was started on 2026-11-05 at the user's request. Do not start M2 until the user asks.
 - **Ask before downloading anything** — state filename, source and size and wait for confirmation (the user's explicit standing requirement for this project).
 - **Verify engine API names against the official docs for the target engine version** rather than relying on memory (texture upload, native plugin, GDExtension/`godot-cpp` version match, Cocos native extension). The doc deliberately specifies structure, not API names.
 - **Do not copy the Leviathan game's format, code, shaders or assets.** The design only borrows generic ideas (chroma key + LUT, side-by-side alpha). `E:\MergeIsland\exported_videos\` holds third-party videos: never put them in the repo and never use them as test material — generate test clips ourselves.
