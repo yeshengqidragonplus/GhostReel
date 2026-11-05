@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0 is complete** (conclusion finalized 2026-11-05) and **M1 (core library + CLI) is in progress** — progress, design decisions and deviations from the design doc are in [docs/m1-notes.md](docs/m1-notes.md); read it before touching `core/src/`. Commits are local; nothing has been pushed. The design document [plans/alphaclip-requirements-and-design.md](plans/alphaclip-requirements-and-design.md) (Chinese, draft v0.2, revised 2026-11-05 from the M0 findings) is the source of truth for requirements, architecture and milestones; read it before doing anything. The final M0 conclusion is [docs/m0-conclusion.md](docs/m0-conclusion.md) — read it too; the design doc (v0.2) already folds its corrections in (§7.1 parser choice, alpha cost, risks R2/R10); where the two differ, the conclusion has the evidence.
+**M0 is complete** (conclusion finalized 2026-11-05) and **M1 (core library + CLI) is functionally done**: Windows and Pixel 6a match ffmpeg byte for byte, threaded player / loop / seek / fuzzing / ASan+UBSan all pass. The conclusion is drafted in [docs/m1-conclusion.md](docs/m1-conclusion.md) and waits for the user's confirmation. Design decisions and deviations from the design doc are in [docs/m1-notes.md](docs/m1-notes.md); read it before touching `core/src/`. Commits are local; nothing has been pushed. M1 produced a static library and a CLI only; the shared library (`.dll`/`.so`) is the first job of M2. The design document [plans/alphaclip-requirements-and-design.md](plans/alphaclip-requirements-and-design.md) (Chinese, draft v0.2, revised 2026-11-05 from the M0 findings) is the source of truth for requirements, architecture and milestones; read it before doing anything. The final M0 conclusion is [docs/m0-conclusion.md](docs/m0-conclusion.md) — read it too; the design doc (v0.2) already folds its corrections in (§7.1 parser choice, alpha cost, risks R2/R10); where the two differ, the conclusion has the evidence.
 
 M0 status: Windows toolchain installed and verified; **`native_alpha` is feasible** (libwebm `webm_parser` + two libvpx decoders, bit-exact vs ffmpeg). Android arm64 also compiles with NDK r30 (empty C++17 `.so`, libvpx cross-built with NEON, and the probe; all ELF LOAD segments are 16 KB-aligned), and the probe was **run on the Pixel 6a** (Android 15, 4 KB pages) with the user's go-ahead: bit-exact vs ffmpeg and vs the Windows plain-C build, keyframe seek and clean failure from a non-keyframe both OK. What M0 did not cover (NEON-vs-C comparison on the same device, real footage, other resolutions/SoCs, multithread, memory, container-level seek) is in the conclusion's hand-off table; none of it blocks M1. `core/spikes/` (`m0_alpha_probe/`, `m0_empty_lib/`) is throwaway M0 code; the real core library is `core/{include,src}` plus the CLI in `tools/cli/`.
 
@@ -24,13 +24,17 @@ The real core library and CLI (M1), Windows:
 
 ```bash
 sh core/scripts/build_core_win64.sh      # builds libvpx if needed, then core + CLI -> build/core-win64/bin/alphaclip.exe
-python -I core/tests/test_vs_ffmpeg.py --cli build/core-win64/bin/alphaclip.exe --ffmpeg-dir E:/Tools/ffmpeg-9.0.2-full_build/bin --workdir <empty dir> samples/m0/alpha_native.webm samples/m0/opaque.webm
+python -I core/tests/test_vs_ffmpeg.py --cli build/core-win64/bin/alphaclip.exe --ffmpeg-dir E:/Tools/ffmpeg-9.0.2-full_build/bin --workdir <empty dir> samples/m0/alpha_native.webm samples/m0/opaque.webm samples/m1/opaque_altref.webm samples/m1/opaque_odd.webm samples/m1/alpha_odd.webm samples/m1/alpha_scenecut.webm   # 281 checks
+powershell -File samples/m1/gen_clips.ps1     # regenerates the M1 edge-case clips (altref superframes, odd size, scene cut)
 ```
 
 ```bash
 python -I core/tests/fuzz_core.py --cli build/core-win64/bin/alphaclip.exe --workdir <empty dir> --cases 1500 samples/m0/alpha_native.webm   # deterministic mutation fuzzing
 sh core/scripts/build_core_android_arm64.sh   # NDK r30, arm64-v8a -> build/core-android-arm64/bin/alphaclip (needs adb to run: ask the user first)
+sh core/scripts/build_core_android_arm64_asan.sh   # same with AddressSanitizer + UBSan, libvpx instrumented too
 ```
+
+On a device: push the binary into a NEW folder under `/data/local/tmp/` (e.g. `ghostreel_m1`), then run the host test scripts with `--cli core/tests/adb_cli.cmd` — it pushes each clip, pulls the `--out` file back and forwards stdout/exit code, so the same checks run on the phone. Env knobs: `AC_DEVICE_DIR`, `AC_TASKSET` (CPU mask), `AC_DEVICE_ENV` (e.g. `LD_LIBRARY_PATH=...` for the ASan runtimes). In Git Bash set `MSYS_NO_PATHCONV=1` first, otherwise `/data/...` in those variables becomes `C:/Program Files/Git/data/...` (the wrapper then exits 125), and `adb.exe` wants `E:/...` rather than `/e/...` paths. Clean the device folder afterwards.
 
 Python's `subprocess` on Windows needs absolute exe paths (`dir/exe` with forward slashes fails in CreateProcess). Windows `sleep_for` is 1–15 ms granular: do not pace a test loop with short sleeps.
 
@@ -73,7 +77,7 @@ Rendering contract: planes are single-channel `R8` textures (U/V at half resolut
 
 ### Alpha modes (selected via sidecar metadata)
 
-`opaque`, `packed_right` / `packed_bottom` (alpha as grayscale next to the picture, so `content_size` ≠ video size), `native_alpha` (WebM BlockAdditional, yuva420p — **verified feasible in M0**: alpha is a second VP9 stream in BlockAdditional (BlockAddID 1), its Y plane is the full-range 0–255 alpha, and the alpha stream costs ≈ +69% decode time per frame on the Windows plain-C build but only ≈ +32% (Cortex-X1) to +45% (Cortex-A55) on the Pixel 6a NEON build (640×360 synthetic clip, single thread); the colour and alpha streams' keyframes must align, which the authoring tool's `verify` must check), and `keyed` (green-screen video + parameters + 32×32×32 LUT laid out as a 1024×32 strip, manually trilinear-sampled in the shader).
+`opaque`, `packed_right` / `packed_bottom` (alpha as grayscale next to the picture, so `content_size` ≠ video size), `native_alpha` (WebM BlockAdditional, yuva420p — **verified feasible in M0**: alpha is a second VP9 stream in BlockAdditional (BlockAddID 1), its Y plane is the full-range 0–255 alpha, and the alpha stream costs ≈ +69% decode time per frame on the Windows plain-C build but ≈ +40% (+39…+44% across Cortex-X1/A76/A55) on the Pixel 6a NEON build (640×360 synthetic clip, single thread; per-frame times jitter ±25% on that phone, so treat them as ranges, see `docs/m1-conclusion.md`); the colour and alpha streams' keyframes must align, which the authoring tool's `verify` must check), and `keyed` (green-screen video + parameters + 32×32×32 LUT laid out as a 1024×32 strip, manually trilinear-sampled in the shader).
 
 ### File format (self-designed, v0.1)
 

@@ -6,6 +6,10 @@
 # "clang" (configure.sh matches `*clang)` to add `-c` to the assembler flags). The NDK's own
 # per-target wrappers on Windows are .cmd files, so we generate tiny sh wrappers instead.
 # They live under build/ (git-ignored). Nothing is put on the system PATH.
+#
+# AC_VPX_ASAN=1 builds an AddressSanitizer-instrumented copy into build/libvpx-android-arm64-asan
+# (used by build_core_android_arm64_asan.sh). The sanitizer flags go into the wrappers, so that
+# configure's own link tests carry them too.
 set -eu
 
 ROOT=/e/ToolsProject/GhostReel
@@ -18,15 +22,36 @@ export PATH="$LLVM:/e/Tools/make-ndk-r23b:$PATH"
 
 # The Makefiles are driven by a native Windows make.exe; it needs E:/... style source paths.
 VPX_SRC="E:/ToolsProject/GhostReel/core/third_party/libvpx"
-OUT="$ROOT/build/libvpx-android-arm64"
-WRAP="$ROOT/build/ndk-wrap-arm64"
+
+if [ "${AC_VPX_ASAN:-0}" = "1" ]; then
+  OUT="$ROOT/build/libvpx-android-arm64-asan"
+  WRAP="$ROOT/build/ndk-wrap-arm64-asan"
+  SAN_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g"
+else
+  OUT="$ROOT/build/libvpx-android-arm64"
+  WRAP="$ROOT/build/ndk-wrap-arm64"
+  SAN_FLAGS=""
+fi
 
 mkdir -p "$WRAP" "$OUT"
-for pair in "clang:clang" "clang++:clang++"; do
-    name="${pair%%:*}"
+for name in clang clang++; do
+  if [ -z "$SAN_FLAGS" ]; then
     printf '#!/bin/sh\nexec "%s/%s.exe" --target=%s "$@"\n' "$LLVM" "$name" "$TRIPLE" \
         > "$WRAP/$TRIPLE-$name"
-    chmod +x "$WRAP/$TRIPLE-$name"
+  else
+    # configure adds -static for Android, which cannot be combined with the sanitizer runtime
+    # (and the test executables it links are never run): the wrapper drops it.
+    cat > "$WRAP/$TRIPLE-$name" <<EOF
+#!/bin/sh
+n=\$#
+while [ \$n -gt 0 ]; do
+  a="\$1"; shift; n=\$((n-1))
+  [ "\$a" = "-static" ] || set -- "\$@" "\$a"
+done
+exec "$LLVM/$name.exe" --target=$TRIPLE $SAN_FLAGS "\$@"
+EOF
+  fi
+  chmod +x "$WRAP/$TRIPLE-$name"
 done
 
 cd "$OUT"

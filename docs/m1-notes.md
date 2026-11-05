@@ -13,8 +13,9 @@ M1 = 核心库 + 命令行小工具,完成标准:与 ffmpeg 参考输出逐帧�
 | M1.4 | 循环(`seek(0)` + pts 偏移)、线程化播放器里的 seek | 完成,全套 99/99 项检查通过 |
 | M1.5a | 对真正的核心库做畸形输入压测(`fuzz_core.py`) | 完成:3 个种子/2 个片子共 4200 例,0 崩溃、0 卡死 |
 | M1.5b | Android arm64 构建核心库与 CLI | 完成:编译无警告,段对齐 16 KB;**尚未在设备上运行** |
-| M1.5c | 在 Pixel 6a 上跑测试、测耗时 | 等用户同意后再做(推送文件到设备要先问) |
-| M1 结论 | 整理成 `docs/m1-conclusion.md` | M1.5c 之后 |
+| M1.5c | 在 Pixel 6a 上跑测试、测耗时(经用户同意) | 完成:普通构建 281/281、ASan+UBSan 构建全部通过、真机变异 2200 例无问题;耗时见结论 |
+| M1+ | 补边界样本:altref 超帧、奇数分辨率、画面硬切(`samples/m1/`) | 完成,Windows 与真机都通过;关键帧错位仍没造出来 |
+| M1 结论 | [m1-conclusion.md](m1-conclusion.md) | 草稿,待用户确认 |
 
 ## 代码布局
 
@@ -109,8 +110,12 @@ sh core/scripts/build_core_android_arm64.sh  # -> build/core-android-arm64/bin/a
 ```bash
 python -I core/tests/test_vs_ffmpeg.py --cli build/core-win64/bin/alphaclip.exe \
   --ffmpeg-dir E:/Tools/ffmpeg-9.0.2-full_build/bin --workdir <一个空目录> \
-  samples/m0/alpha_native.webm samples/m0/opaque.webm
+  samples/m0/alpha_native.webm samples/m0/opaque.webm samples/m1/opaque_altref.webm \
+  samples/m1/opaque_odd.webm samples/m1/alpha_odd.webm samples/m1/alpha_scenecut.webm
 ```
+
+同一个脚本可以通过 `--cli core/tests/adb_cli.cmd` 在连着的手机上跑(先把 Android 版 `alphaclip` 推到设备上的新目录,
+细节和环境变量见 `core/tests/adb_cli.py` 的说明和 CLAUDE.md),ASan+UBSan 版同理。
 
 测试脚本用 ffmpeg(`-c:v libvpx-vp9`,放在 `-i` 之前)独立解码出参考输出,用 ffprobe 读出每个包的时间戳和关键帧标志;
 检查 `info`、全部帧逐字节一致、在片头/片中/帧间/每个关键帧及其前一刻/片尾之外的 seek、以及缺文件、空文件、随机字节、
