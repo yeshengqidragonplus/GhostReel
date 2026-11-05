@@ -27,7 +27,12 @@ sh core/scripts/build_core_win64.sh      # builds libvpx if needed, then core + 
 python -I core/tests/test_vs_ffmpeg.py --cli build/core-win64/bin/alphaclip.exe --ffmpeg-dir E:/Tools/ffmpeg-9.0.2-full_build/bin --workdir <empty dir> samples/m0/alpha_native.webm samples/m0/opaque.webm
 ```
 
-Python's `subprocess` on Windows needs absolute exe paths (`dir/exe` with forward slashes fails in CreateProcess).
+```bash
+python -I core/tests/fuzz_core.py --cli build/core-win64/bin/alphaclip.exe --workdir <empty dir> --cases 1500 samples/m0/alpha_native.webm   # deterministic mutation fuzzing
+sh core/scripts/build_core_android_arm64.sh   # NDK r30, arm64-v8a -> build/core-android-arm64/bin/alphaclip (needs adb to run: ask the user first)
+```
+
+Python's `subprocess` on Windows needs absolute exe paths (`dir/exe` with forward slashes fails in CreateProcess). Windows `sleep_for` is 1–15 ms granular: do not pace a test loop with short sleeps.
 
 Android arm64 spikes (Git Bash, repo root; the second script needs the first one's output):
 

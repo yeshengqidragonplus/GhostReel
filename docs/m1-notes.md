@@ -11,7 +11,10 @@ M1 = 核心库 + 命令行小工具,完成标准:与 ffmpeg 参考输出逐帧�
 | M1.2 | VP9 解码(两个解码器)、`decode` 命令、对 ffmpeg 逐字节比对、seek | 完成,43/43 项检查通过 |
 | M1.3 | 解码线程、有界队列、`ac_acquire_frame` / `ac_release_frame`、统计 | 完成,69/69 项检查通过 + 150 次压力运行无异常 |
 | M1.4 | 循环(`seek(0)` + pts 偏移)、线程化播放器里的 seek | 完成,全套 99/99 项检查通过 |
-| M1.5 | 畸形输入加固与模糊测试、Android arm64 构建并在 Pixel 6a 上跑 | 未开始 |
+| M1.5a | 对真正的核心库做畸形输入压测(`fuzz_core.py`) | 完成:3 个种子/2 个片子共 4200 例,0 崩溃、0 卡死 |
+| M1.5b | Android arm64 构建核心库与 CLI | 完成:编译无警告,段对齐 16 KB;**尚未在设备上运行** |
+| M1.5c | 在 Pixel 6a 上跑测试、测耗时 | 等用户同意后再做(推送文件到设备要先问) |
+| M1 结论 | 整理成 `docs/m1-conclusion.md` | M1.5c 之后 |
 
 ## 代码布局
 
@@ -24,8 +27,8 @@ core/src/vp9_decoder.*     libvpx 的薄封装;native_alpha 用两个实例
 core/src/player.{h,cpp}    线程化播放器:一个解码线程 + 有界队列
 core/src/common.h          上限常量、内部错误类型 ac::Failure
 tools/cli/main.cpp         alphaclip info / decode
-core/tests/                test_vs_ffmpeg.py
-core/scripts/              build_libvpx_win64.sh、build_core_win64.sh
+core/tests/                test_vs_ffmpeg.py(对 ffmpeg 与播放器行为)、fuzz_core.py(畸形输入)
+core/scripts/              build_libvpx_{win64,android_arm64}.sh、build_core_{win64,android_arm64}.sh
 ```
 
 ## 相对设计文档的决定与差异(需要你知道)
@@ -80,10 +83,27 @@ core/scripts/              build_libvpx_win64.sh、build_core_win64.sh
 为了确认 seek 测试不是"永远会过",做了一次变异测试:临时去掉解码线程里"丢弃 seek 之前开始解码的过时帧"的检查,
 seek-while-busy 的两组(队列深度 1 和 4)都立刻失败(报 "stale frame after the seek"),还原后全部通过。
 
+## 畸形输入压测(M1.5a)
+
+`core/tests/fuzz_core.py` 对 `alphaclip` 做确定性变异(固定种子,失败可复现),每例交替跑同步 `decode` 和线程化 `play`:
+截断、随机字节翻转(一半落在文件头 4 KB 内)、清零/0xFF/随机区域,以及"结构命中"——把字节改在每个关心的 EBML 元素 ID
+(Segment、Tracks、Cluster、SimpleBlock、BlockGroup、BlockAdditions、Cues、PixelWidth/Height、AlphaMode……)后面的大小字段上,
+专门打大小解析和越界检查。退出码 0/1/2 算干净;其他退出码算崩溃;超过 20 秒算卡死。
+
+结果:alpha 片 1500 例(种子 20261105)、alpha 片 1500 例(种子 987654)、不透明片 1200 例(种子 1),共 4200 例,
+**0 崩溃、0 卡死**,绝大多数报 `AC_ERR_FORMAT`/`AC_ERR_DECODE`,少数损坏恰好不影响解码("仍能解码")。
+抽样看过错误信息:单字节损坏几乎都是 libvpx 报的 `Invalid frame marker` / `Failed to decode tile data`——帧边界对不上后,
+剩下的字节被当成下一帧解析而被识别出来,不是我们的检查过严。
+
+**这不能证明内存安全**:Windows 的 llvm-mingw 没有 ASan/UBSan,没有 libFuzzer,变异是确定性的、规模有限。
+还有一个已知缺口(见上面第 5 点):被篡改的帧头声明很大的尺寸时,libvpx 可能先分配很大的缓冲区,压测没有覆盖这一点。
+想要更强的保证,下一步是在 Android 上用 NDK 自带的 ASan 运行时跑同一批变异,以及用 libFuzzer 做覆盖率引导的模糊测试。
+
 ## 构建与测试
 
 ```bash
 sh core/scripts/build_core_win64.sh          # -> build/core-win64/bin/alphaclip.exe
+sh core/scripts/build_core_android_arm64.sh  # -> build/core-android-arm64/bin/alphaclip(adb shell 用的可执行文件)
 ```
 
 ```bash
