@@ -1,0 +1,5 @@
+# build output (out-of-tree builds live here)
+build/
+
+# regenerable by samples/m0/gen_test_clips.ps1 (13.5 MB of raw ground truth)
+samples/m0/*.gray

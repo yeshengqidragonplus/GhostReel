@@ -1,0 +1,5 @@
+# Shell scripts run under Git Bash / sh and must never be checked out with CRLF
+# (core.autocrlf=true on Windows would otherwise add it and break them).
+*.sh text eol=lf
+# Test clips are binary.
+*.webm binary

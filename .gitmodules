@@ -1,0 +1,8 @@
+[submodule "core/third_party/libvpx"]
+	path = core/third_party/libvpx
+	url = https://github.com/webmproject/libvpx
+	shallow = true
+[submodule "core/third_party/libwebm"]
+	path = core/third_party/libwebm
+	url = https://github.com/webmproject/libwebm
+	shallow = true
