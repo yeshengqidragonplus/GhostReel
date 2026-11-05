@@ -1,6 +1,6 @@
 # AlphaClip(暂定名)— 跨引擎透明视频插件:需求与设计方案
 
-- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md))
+- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md);M2 完成后在 §9.1、§11、§13 补了「M2」标注,见 [M2 结论](../docs/m2-conclusion.md))
 - 用途:作为新项目的起点文档。新项目里把本文件放进 `docs/`,让 Claude 先读它再动手。
 - 开发节奏:**小步慢做,每个里程碑独立可验证、可随时暂停**(见第 11 节)。
 - 范围:一套 C++ 核心 + Unity / Godot 4 / Cocos Creator 3.x 三个薄绑定 + 离线制作工具。
@@ -278,6 +278,12 @@ void ac_close(ac_player*);
   - v1:`Texture2D.LoadRawTextureData(IntPtr, size)` + `Apply(false)`,实现最简单。
   - v2(优化):原生渲染插件 + `GL.IssuePluginEvent`,在渲染线程用 `glTexSubImage2D` / Vulkan 暂存缓冲上传,减少主线程停顿。
 
+> **M2:** 实际做出来的包是 `com.alphaclip.video`(`AlphaClipPlayer`、`AlphaClipRendererBinder`;`AlphaClipGraphic` / `AlphaClipRenderer` 没做,
+> 任何材质、RawImage 或相机直接用 `Output` 这张 `RenderTexture` 即可)。纹理上传用的是上面的 v1。**与上面的结构不同的一点:** 组件不让每个渲染器自己画三个平面,
+> 而是把 Y/U/V 用着色器 `Graphics.Blit` 到一张 RGBA 的 `RenderTexture`,代价是多一张 w×h×4 字节的贴图和每个新帧一次全屏绘制,好处是不依赖具体渲染管线和 UI 着色器、
+> 以后 alpha(预乘)可以直接写进它的 alpha 通道;M3 的基线若显示这一遍成问题再改。时钟是 `Time.unscaledTimeAsDouble`,从 `Play()` / `Seek()` 之后的下一次 `Update` 起算。
+> 着色器是手写的 Unity 版本,单一主源加生成脚本(§8.3)还没有做。完整的决定见 `docs/m2-notes.md`。
+
 ### 9.2 Godot 4
 
 - 形态:GDExtension(`godot-cpp`),注意 `godot-cpp` 版本需与引擎小版本匹配。
@@ -319,7 +325,7 @@ void ac_close(ac_player*);
 |---|---|---|
 | **M0 工具链** ✅ | 装好 CMake、Ninja、Windows 编译器、对应版本的 Android NDK;拉取 libvpx、libwebm;验证 libvpx 读 WebM alpha 的可行性 | 能编译出 Windows 和 Android arm64 的空库;alpha 可行性有结论。**已完成(2026-11-05),结论见 `docs/m0-conclusion.md`** |
 | **M1 核心解码** ✅ | 核心库 + 命令行小工具:WebM → 逐帧输出 YUV(PNG 推到 M4,需要 sidecar 里的矩阵和范围)。含 seek 和循环的时钟逻辑(打开时建完整包索引,seek 不依赖 Cues) | 与 ffmpeg 参考输出逐帧一致(alpha 的参考输出要用 `-c:v libvpx-vp9`)。**已完成(2026-11-05),结论见 `docs/m1-conclusion.md`** |
-| **M2 Unity 编辑器原型** | Windows 编辑器里播放不透明视频 | 画面正确、能循环、不泄漏 |
+| **M2 Unity 编辑器原型** ✅ | Windows 编辑器里播放不透明视频(核心的 Windows 共享库 + Unity 包;内置管线和 URP) | 画面正确、能循环、不泄漏。**已完成(2026-11-05),结论见 `docs/m2-conclusion.md`**(2022.3.62f2 和 6000.3.2f1;HDRP、Windows 播放器构建未测) |
 | **M3 Android 真机** | 同一套代码在 Pixel 6a 上播放;记录性能基线 | 真机播放正确,基线数据入库 |
 | **M4 透明(基础)** | `packed_right`/`packed_bottom` + `native_alpha`,预乘输出 | 在 UI 和场景里叠加无黑边 |
 | **M5 制作工具** | `encode` / `inspect` / `verify` 命令行 | 一条命令把素材变成可播放的包 |
@@ -346,7 +352,7 @@ void ac_close(ac_player*);
 |---|---|---|
 | R1 | 软解 VP9 在低端 Android 上吃不消 | M3 建立基线;限制分辨率和并发;后期加 MediaCodec 通道。**M0/M1 数据点:** Pixel 6a、640×360、单线程,核心库解码线程(彩色加 alpha,含平面拷贝)约 1.1–1.4 ms/帧(大核)、2.2–2.4(中核)、4.4–4.8(小核);alpha 片比不透明片多约 40%;同一类核上单帧耗时就有 ±25% 的抖动,基线必须固定核、多次重复、记录频率和温度;目标规格未定,不要外推(见 docs/m1-conclusion.md) |
 | R2 | ~~libvpx 读不到 WebM 原生 alpha,或行为不稳定~~ | **已关闭(M0,2026-11-05):** `native_alpha` 可行,见 `docs/m0-conclusion.md`。残留的关键帧对齐问题见 R10 |
-| R3 | Unity Linear 色彩空间下抠边偏色 | 着色器里显式处理转换;黄金图覆盖两种色彩空间 |
+| R3 | Unity Linear 色彩空间下抠边偏色 | 着色器里显式处理转换;黄金图覆盖两种色彩空间。**M2:** 不透明的 YUV→RGB 路径在 Gamma 和 Linear 工程下读回都与独立 CPU 参考最大差 1(着色器按 `QualitySettings.activeColorSpace` 自动处理);`keyed` 的抠边路径还没做 |
 | R4 | 三个引擎的纹理上传接口细节和版本差异 | 每个引擎只做薄层;API 名称实现时核对官方文档 |
 | R5 | Android 16 KB 页大小等平台新要求 | M3 时按 Google 官方最新文档核对并用对应 NDK 构建。**M0:** NDK r30 默认 16 KB 对齐(已验证 ELF 段对齐);APK 内 zip 对齐和 Play 检查留到 M3;Unity 2022.3 需 ≥ 2022.3.56f1 且 Burst ≥ 1.8.21 |
 | R6 | `keyed` 抠图质量上限不明 | 放在 M7,先用并排/原生 alpha 打通主链路 |
@@ -362,7 +368,7 @@ void ac_close(ac_player*);
 - [ ] 你们的素材主要是"真透明"还是"绿幕"?(决定 `keyed` 的优先级)
 - [ ] 典型分辨率、帧率、同时播放数量的上限
 - [ ] 是否需要音频
-- [ ] 目标 Unity 的最低版本(M0 核对:本机有 2022.3.20f1c1、2022.3.62f2、6000.2.10f1、6000.3.2f1;2022.3 要 ≥ 2022.3.56f1 才支持 16 KB 页)
+- [ ] 目标 Unity 的最低版本(M0 核对:本机有 2022.3.20f1c1、2022.3.62f2、6000.2.10f1、6000.3.2f1;2022.3 要 ≥ 2022.3.56f1 才支持 16 KB 页。**M2:** 2022.3.62f2 和 6000.3.2f1 上测试都通过;用户日常用 6000,M3 前决定以哪个为准,6000 要装 Android 模块并解决 URP 17 依赖包的管理)
 - [ ] 是否确定只做 VP9,不做 H.264
 - [ ] 首期平台:Android arm64 + Windows 编辑器,是否同意
 
