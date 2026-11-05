@@ -46,21 +46,32 @@ bindings/unity/scripts/                 sync_plugin_win64.sh、run_editmode_test
    `Open(TextAsset)`(`.bytes` 资源,资源包里的原始数据就是这么走的)。Android 的 StreamingAssets 在 APK 里,要用 UnityWebRequest 读字节再 `Open(byte[])`——留给 M3。
 7. **生命周期:** `OnDestroy` → `Close()`:先 `ac_close`(会 join 解码线程),再释放字节拷贝,再销毁贴图、材质、渲染纹理。`OnDisable` 不做事:Update 不再被调用,
    核心的队列满了解码线程就会停下,CPU 占用接近零,所以没有单独做"后台暂停"(设计 §9.4 里要求的"应用进后台时暂停解码"留给真机阶段确认)。
-8. **时钟:** `Time.unscaledTimeAsDouble`。批处理模式的播放模式里,Unity 自己的两种时间不一致(`unscaledTimeAsDouble` 比 `realtimeSinceStartup` 快约 30%),
-   所以播放模式测试按引擎时钟验证节奏,不按墙上时钟。
+8. **时钟:** `Time.unscaledTimeAsDouble`。批处理模式的播放模式里,Unity 自己的两种时间不一致(`unscaledTimeAsDouble` 比 `realtimeSinceStartup` 快约 30%;Unity 6 上量到 1.6 倍,帧率每秒几千帧时更多),
+   所以播放模式测试按引擎时钟验证节奏,不按墙上时钟。时钟从 `Play()`/`Seek()` 之后的**下一次 `Update`** 开始计,见第 9 条末尾。
 9. **URP(补测):**
    - **包:** URP、Core RP、Shader Graph、universal-config 都是编辑器自带的内置包(`BuiltInPackages`),不需要下载。公开注册表里 URP 的版本列表只到 10.10.1
      (14.x / 17.x 只随编辑器提供),所以不能靠查注册表找它们。2022.3 上它们依赖的 burst / mathematics / searcher,本机缓存里有更高的版本
      (1.8.21 / 1.2.6 / 4.9.2),测试工程的清单里直接指定这几个版本;用"死代理"保险(`-OfflineGuard`)启动编辑器确认了没有联网。
-   - **6000.3.2f1 + URP 17.3.0 要下载** mathematics 1.3.2、collections 2.4.3、searcher 4.9.3、nuget.mono-cecil 1.11.4、test-framework.performance 3.0.3,
-     共约 3.75 MB(来源 `download.packages.unity.com`);burst 固定到缓存里的 1.8.21,避免 URP 依赖链要的 1.8.14(399 MB)。等用户同意再下。
+   - **6000.3.2f1 + URP 17.3.0 要下载**(用户同意后下载了,只下这五个)mathematics 1.3.2、collections 2.4.3、searcher 4.9.3、nuget.mono-cecil 1.11.4、
+     test-framework.performance 3.0.3,共 3.75 MB(来源 `download.packages.unity.com`,逐个核对了注册表给的大小和 SHA-1)。它们只放在临时目录和 Unity 6 的工程副本里
+     (清单里用 `file:` 指向本地 tgz),不进全局缓存也不进仓库。
+   - **Unity 6 的包管理器不复用旧的"已解压全局缓存":** 同样的 burst 1.8.21 在 2022.3 上直接用缓存,在 Unity 6 上却还是尝试联网下载(被 `-OfflineGuard` 拦下)。
+     解决办法是把缓存里的 `com.unity.burst-1.8.21` 文件夹复制出来,清单里写 `file:` 指向这个文件夹(1.2 GB 的本地拷贝,没有下载;不能指向 tgz,因为缓存里只有解压后的目录)。除 burst 之外 URP 17 依赖链上缺的包就是上面那五个。
+   - **清单必须不带 BOM:** Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM,Unity 的清单 JSON 解析器拒收;用 Python 写。
    - **`Graphics.Blit` 在 SRP 里的调用位置:** Unity 文档建议在 `RenderPipelineManager.endContextRendering` 之类的回调里调用。实测在 URP 14.0.12 上,
      组件在 `Update()` 里直接调用(编辑模式测试里在渲染循环之外调用、播放模式里由 `Update` 调用)工作正常,画面与内置管线逐值一致;所以没有改成回调。
-     URP 17 / HDRP 没有验证,仍是已知风险。
+     Unity 6000.3.2f1 + URP 17.3.0(默认 Render Graph)上同样的测试也全部通过,画面与参考最大差 1,所以仍然没有改成回调。HDRP 没有验证,仍是已知风险。
    - **材质属性:** URP 的着色器用 `_BaseMap`,内置用 `_MainTex`;`AlphaClipRendererBinder` 默认自动选(材质有 `_BaseMap` 就用它)。内置的 `Unlit/Texture` 在 URP 里也能画(没有 LightMode 的 pass 会被 URP 当 SRPDefaultUnlit 渲染)。
    - **测试:** 运行脚本多了 `-Pipeline Builtin|URP`(按需切换工程并重启一次编辑器)和 `-OfflineGuard`;测试会校验当前管线;相机渲染 `Output` 的测试在 URP 下用两种材质(`Universal Render Pipeline/Unlit` 和内置 `Unlit/Texture`)。
    - **测试里踩的两个坑:** 播放模式的"节奏"检查原先比较总耗时,结果切换色彩空间后的第一次启动因为着色器编译卡了 1.2 秒而失败一次,同样配置重跑两次都通过;
      改成逐帧看"画面落后时钟多少"的中位数和 95 分位(17 ms / 32 ms),不受一次性卡顿影响。另外,运行脚本里局部变量 `$method` 覆盖了 `-Method` 参数(PowerShell 变量不区分大小写)。
+   - **Unity 6 + URP 17 上这条检查又失败了,这次查出来的是组件的真实问题,不是测试的抖动:** 每次运行第一张画面都落后时钟约 1.3 秒(统计量是"落后多少",
+     按帧数取 95 分位,批处理模式里每秒两千多帧,启动时追赶的那 80 帧正好压在 95 分位的边缘,所以时好时坏)。原因:`Play()` 在某一帧中间被调用,时钟从调用那一刻开始计,
+     而这一帧剩下的部分(渲染、URP 17 的首次着色器编译、场景加载)可能很长,下一帧 `Update` 看到时钟已经走了 1.3 秒,于是剪辑开头被快进。
+     修法:`Play()` 和 `Seek()` 只记下"待锚定",时钟从**下一次 `Update`** 开始计(`m_anchorPending`);顺手让 `Play()` 在已经播放时直接返回(原先重复调用会把时钟倒回上一次的基准)。
+     新增一项检查:第一张画面落后时钟不超过 500 ms(修之前每次 1.3 秒,修之后 140–220 ms,这是解码线程出第一帧的耗时,Windows 纯 C 构建上的数,真机另量)。
+     修后落后量的中位数 16 ms、95 分位 31 ms(之前 17 ms / 63–678 ms)。
+     **遗留:** 第一张画面前时钟仍在走(要等解码线程出第一帧),所以起始处最多会丢掉约这个耗时那么长的一段;要做到"等第一帧再开始计时"需要核心提供"第一帧 pts"的查询,M3 量过真机上的首帧耗时再决定。
 10. **验证方法的几条教训**(也写进了 CLAUDE.md):
    - 编辑模式不发 `OnDestroy`,所以编辑模式测试显式 `Close()`,`OnDestroy` 路径由播放模式测试覆盖。
    - `Process.PrivateMemorySize64` 在 Mono 里不动,用 Win32 `GetProcessMemoryInfo`;进程私有字节会受显卡驱动的延迟释放影响,单个 200 周期窗口里能摆动 ±150 MB 而没有趋势,

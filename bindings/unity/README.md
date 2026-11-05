@@ -50,10 +50,13 @@ renderer.material.mainTexture = player.Output; // 或者给物体加 AlphaClipRe
 - URP:`Universal Render Pipeline/Unlit`、`Lit` 用 `_BaseMap`;内置的 `Unlit/Texture` 在 URP 里也能画。
 - `AlphaClipRendererBinder` 默认自动找属性(材质有 `_BaseMap` 就用它,否则 `_MainTex`);自定义着色器可以在 `Texture Property` 里写名字。
 
-已在 **2022.3.62f2 + URP 14.0.12** 验证(见 `docs/m2-conclusion.md`);HDRP 和 Unity 6 上的 URP 17 还没有。
+已在 **2022.3.62f2 + URP 14.0.12** 和 **6000.3.2f1 + URP 17.3.0** 验证(见 `docs/m2-conclusion.md`);HDRP 还没有。
 测试工程里 `run_editmode_tests.ps1 -Pipeline URP` 会把工程切到 URP(`-Pipeline Builtin` 切回),`-OfflineGuard` 让编辑器在一个死代理后面启动,
 这样 Package Manager 想联网就会失败而不是悄悄下载。URP、Core RP、Shader Graph 是编辑器自带的内置包,不需要下载;
 2022.3 上它们依赖的 burst / mathematics / searcher 用的是本机缓存里的版本(测试工程清单里直接指定了版本)。
+Unity 6 上 URP 17 依赖的几个包(mathematics、collections、searcher、mono-cecil、test-framework.performance,共约 3.75 MB)本机没有,
+而且 Unity 6 的包管理器不复用旧的全局缓存(burst 也要从 `file:` 本地文件夹引用),细节见 `docs/m2-notes.md` 第 9 条;
+`bindings/unity/TestProject` 的清单保持 2022.3 的版本,Unity 6 + URP 17 只在工程副本里验证过。
 
 ## 色彩设置(M4 起由 sidecar 提供)
 
@@ -85,8 +88,10 @@ powershell -File bindings/unity/scripts/run_editmode_tests.ps1 -Demo -SnapshotDi
 ## 已知限制
 
 - 只有 Windows 编辑器;没有 Windows 播放器构建、Android、macOS(见设计文档里程碑)。
-- 渲染管线:内置管线和 2022.3 上的 URP 14.0.12 验证过。Unity 文档说在 SRP 里 `Graphics.Blit` 应在
-  `RenderPipelineManager.endContextRendering` 之类的回调里调用;组件现在是在 `Update()` 里直接调用,在 URP 14.0.12 上实测正常
-  (编辑模式和播放模式),但 URP 17 / HDRP 没有验证,这条仍是已知风险。
+- 渲染管线:内置管线、2022.3 上的 URP 14.0.12、Unity 6000.3.2f1 上的 URP 17.3.0(Render Graph)验证过。Unity 文档说在 SRP 里 `Graphics.Blit` 应在
+  `RenderPipelineManager.endContextRendering` 之类的回调里调用;组件现在是在 `Update()` 里直接调用,在上面这些配置里实测正常
+  (编辑模式、播放模式和演示场景),但 HDRP 没有验证,这条仍是已知风险。
+- 时钟从 `Play()` / `Seek()` 之后的下一次 `Update` 开始计,但第一张画面要等解码线程出第一帧;这段时间(Windows 纯 C 构建上 140–220 ms)时钟已经在走,
+  起始处最多丢掉这么长一段。真机上的首帧耗时 M3 再量。
 - 没有 alpha(M4)、没有音频、没有 sidecar 元数据(M4)。
 - StreamingAssets 路径用的是普通文件路径;Android 上 StreamingAssets 在 APK 里,要先用 UnityWebRequest 读出字节再 `Open(byte[])`(M3)。

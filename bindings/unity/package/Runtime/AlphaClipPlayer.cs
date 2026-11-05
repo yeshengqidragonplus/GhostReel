@@ -105,6 +105,10 @@ namespace AlphaClip
         private bool m_playing;
         private bool m_ended;
         private double m_startRealtime;
+        // Play() and Seek() are usually called in the middle of a frame; the rest of that frame (rendering, a first-use
+        // shader compile, scene loading) can take a long time. The clock therefore starts counting at the next Update
+        // instead of at the call, so a start-up hitch does not make the first part of the clip fast-forward.
+        private bool m_anchorPending;
         private long m_baseClockUs;
         private long m_lastPtsUs = -1;
         private long m_framesPresented;
@@ -148,7 +152,7 @@ namespace AlphaClip
         public int QueueDepth { get => queueDepth; set => queueDepth = Mathf.Clamp(value, 1, 64); }
 
         /// <summary>The media clock, in microseconds, that <see cref="Update"/> hands to the core.</summary>
-        public long CurrentClockUs => m_playing
+        public long CurrentClockUs => m_playing && !m_anchorPending
             ? m_baseClockUs + (long)((Time.unscaledTimeAsDouble - m_startRealtime) * 1e6)
             : m_baseClockUs;
 
@@ -208,7 +212,12 @@ namespace AlphaClip
             {
                 throw new InvalidOperationException("AlphaClipPlayer: no clip is open");
             }
+            if (m_playing)
+            {
+                return;   // already running: do not rewind the clock to the last base position
+            }
             m_startRealtime = Time.unscaledTimeAsDouble;
+            m_anchorPending = true;
             m_playing = true;
         }
 
@@ -229,6 +238,7 @@ namespace AlphaClip
             AcNative.Seek(m_player, us);
             m_baseClockUs = us;
             m_startRealtime = Time.unscaledTimeAsDouble;
+            m_anchorPending = true;
             m_lastPtsUs = -1;
             m_ended = false;
         }
@@ -332,6 +342,11 @@ namespace AlphaClip
             if (!m_playing)
             {
                 return;
+            }
+            if (m_anchorPending)
+            {
+                m_startRealtime = Time.unscaledTimeAsDouble;
+                m_anchorPending = false;
             }
             try
             {

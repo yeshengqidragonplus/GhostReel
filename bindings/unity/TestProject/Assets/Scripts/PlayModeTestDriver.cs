@@ -173,6 +173,26 @@ namespace AlphaClip.Tests
             // Pacing: the picture on screen must keep up with the player's clock. Judged by the lag per frame (median and
             // 95th percentile), which a one-off start-up hitch (shader compilation right after a project setting changed,
             // seen once at 1.2 s) does not disturb, unlike the total elapsed time.
+            long firstLag = lags.Count > 0 ? lags[0] : long.MaxValue;
+            int caughtUp = lags.FindIndex(l => l < 100_000);
+            long maxLag = 0;
+            int maxLagFrame = -1;
+            for (int i = 0; i < lags.Count; i++)
+            {
+                if (lags[i] > maxLag)
+                {
+                    maxLag = lags[i];
+                    maxLagFrame = i;
+                }
+            }
+            m_report.AppendLine("INFO  lag timeline: " + lags.Count + " frames; first/last lag " + (lags.Count > 0 ? lags[0] / 1000 : -1) + "/" +
+                                (lags.Count > 0 ? lags[lags.Count - 1] / 1000 : -1) + " ms; below 100 ms from frame " + caughtUp +
+                                "; max " + maxLag / 1000 + " ms at frame " + maxLagFrame);
+            // The clock starts at the first Update after Play(), so a hitch before it (loading, a first-use shader compile)
+            // must not make the start of the clip fast-forward: the first picture is shown on time.
+            // Measured 140-220 ms on Unity 6 (the decode thread needs that long for its first frame on the plain-C Windows
+            // build); the hitch this guards against was 1.3 s.
+            Check(firstLag < 500_000, "the clock starts with playback: the first picture is " + firstLag / 1000 + " ms behind it");
             lags.Sort();
             long medianLag = lags.Count > 0 ? lags[lags.Count / 2] : long.MaxValue;
             long p95Lag = lags.Count > 0 ? lags[Math.Min(lags.Count - 1, lags.Count * 95 / 100)] : long.MaxValue;
