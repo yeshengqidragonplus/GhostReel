@@ -1,7 +1,7 @@
-# M1 笔记(进行中)
+# M1 笔记
 
-M1 = 核心库 + 命令行小工具,完成标准:与 ffmpeg 参考输出逐帧一致(设计文档 §11)。
-本文记录 M1 里做的设计决定,以及它们相对设计文档 v0.2 的差异。M1 结束时会整理成 M1 结论。
+M1 = 核心库 + 命令行小工具,完成标准:与 ffmpeg 参考输出逐帧一致(设计文档 §11)。**M1 已定稿(2026-11-05)**,结论见 [m1-conclusion.md](m1-conclusion.md)。
+本文记录 M1 里做的设计决定,以及它们相对设计文档 v0.2 的差异;写 `core/src/` 之前先读它。
 
 ## 进度
 
@@ -15,7 +15,7 @@ M1 = 核心库 + 命令行小工具,完成标准:与 ffmpeg 参考输出逐帧�
 | M1.5b | Android arm64 构建核心库与 CLI | 完成:编译无警告,段对齐 16 KB;**尚未在设备上运行** |
 | M1.5c | 在 Pixel 6a 上跑测试、测耗时(经用户同意) | 完成:普通构建 281/281、ASan+UBSan 构建全部通过、真机变异 2200 例无问题;耗时见结论 |
 | M1+ | 补边界样本:altref 超帧、奇数分辨率、画面硬切(`samples/m1/`) | 完成,Windows 与真机都通过;关键帧错位仍没造出来 |
-| M1 结论 | [m1-conclusion.md](m1-conclusion.md) | 草稿,待用户确认 |
+| M1 结论 | [m1-conclusion.md](m1-conclusion.md) | **已定稿** |
 
 ## 代码布局
 
@@ -44,6 +44,7 @@ core/scripts/              build_libvpx_{win64,android_arm64}.sh、build_core_{w
    - `ac_decode_next`:同步解码下一帧,无线程无时钟,给工具和测试用(后续 `verify` 也要用)。
    - 状态码 `AC_END`(流结束,没有更多帧)和 `AC_ERR_ARG`(参数非法);数值固定,新增只追加。
    - `ac_info.packet_count`;`ac_version()`;`ac_last_error(NULL)` 返回当前线程上最近一次失败(打开失败时没有 player)。
+2b. **命令行只输出原始平面 YUV(A),没有 PNG**:设计 §11 写的是"YUV/PNG",但 PNG 需要 YUV→RGB 的矩阵和范围,它们来自 sidecar(M4)。
 3. **`meta_json` 暂不支持**:传非空字符串返回 `AC_ERR_UNSUPPORTED`,传 `NULL`。sidecar 元数据(§6)要等 M4 再做,
    M1 的片子类型由 WebM 自己的 AlphaMode 和 BlockAdditional 决定。
 4. **严格策略**(都返回错误而不是猜):

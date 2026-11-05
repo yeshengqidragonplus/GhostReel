@@ -1,6 +1,6 @@
 # AlphaClip(暂定名)— 跨引擎透明视频插件:需求与设计方案
 
-- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」)
+- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md))
 - 用途:作为新项目的起点文档。新项目里把本文件放进 `docs/`,让 Claude 先读它再动手。
 - 开发节奏:**小步慢做,每个里程碑独立可验证、可随时暂停**(见第 11 节)。
 - 范围:一套 C++ 核心 + Unity / Godot 4 / Cocos Creator 3.x 三个薄绑定 + 离线制作工具。
@@ -212,6 +212,11 @@ const char* ac_last_error(ac_player*);
 void ac_close(ac_player*);
 ```
 
+> **M1:** 上面是 v0.1 的草案;实际接口以 `core/include/alphaclip.h` 为准。主要差异:新增 `ac_decode_next`(同步解码,工具和测试用)、
+> `ac_set_queue_depth`、`ac_set_loop`、`ac_get_stats`(解码帧数、丢帧数、解码线程耗时等,即 NFR-1 的指标);状态码新增 `AC_END` 和 `AC_ERR_ARG`;
+> `ac_info` 新增 `packet_count`、`loop_period_us`;`meta_json` 暂不支持(传非空返回 `AC_ERR_UNSUPPORTED`,M4 再做)。
+> 完整的决定和理由见 `docs/m1-notes.md`。
+
 ### 7.3 线程与时钟
 
 - 一个解码线程:解封装 → 解码 → 写入有界环形队列(默认 4 帧)。
@@ -313,7 +318,7 @@ void ac_close(ac_player*);
 | 阶段 | 内容 | 完成标准 |
 |---|---|---|
 | **M0 工具链** ✅ | 装好 CMake、Ninja、Windows 编译器、对应版本的 Android NDK;拉取 libvpx、libwebm;验证 libvpx 读 WebM alpha 的可行性 | 能编译出 Windows 和 Android arm64 的空库;alpha 可行性有结论。**已完成(2026-11-05),结论见 `docs/m0-conclusion.md`** |
-| **M1 核心解码** | 核心库 + 命令行小工具:WebM → 逐帧输出 YUV/PNG。含 M0 遗留的容器层 seek(Cues + `DidSeek`)和循环的时钟逻辑 | 与 ffmpeg 参考输出逐帧一致(alpha 的参考输出要用 `-c:v libvpx-vp9`) |
+| **M1 核心解码** ✅ | 核心库 + 命令行小工具:WebM → 逐帧输出 YUV(PNG 推到 M4,需要 sidecar 里的矩阵和范围)。含 seek 和循环的时钟逻辑(打开时建完整包索引,seek 不依赖 Cues) | 与 ffmpeg 参考输出逐帧一致(alpha 的参考输出要用 `-c:v libvpx-vp9`)。**已完成(2026-11-05),结论见 `docs/m1-conclusion.md`** |
 | **M2 Unity 编辑器原型** | Windows 编辑器里播放不透明视频 | 画面正确、能循环、不泄漏 |
 | **M3 Android 真机** | 同一套代码在 Pixel 6a 上播放;记录性能基线 | 真机播放正确,基线数据入库 |
 | **M4 透明(基础)** | `packed_right`/`packed_bottom` + `native_alpha`,预乘输出 | 在 UI 和场景里叠加无黑边 |
@@ -347,7 +352,7 @@ void ac_close(ac_player*);
 | R6 | `keyed` 抠图质量上限不明 | 放在 M7,先用并排/原生 alpha 打通主链路 |
 | R7 | 着色器多端生成产生漂移 | 黄金图测试 + 单一主源 |
 | R8 | 多实例同时解码导致卡顿 | 全局并发上限与降级策略(FR-10) |
-| R9 | WebM 无 Cues 时 seek 慢或失败 | 制作工具强制写入 Cues;`verify` 检查 |
+| R9 | WebM 无 Cues 时 seek 慢或失败 | 制作工具强制写入 Cues;`verify` 检查。**M1:** 核心打开时扫描整个文件建完整的包索引,seek 不依赖 Cues,此风险对核心不成立;Cues 仍有意义(其他播放器、以后从磁盘流式读取) |
 | R10 | `native_alpha` 的彩色流与 alpha 流关键帧不对齐(如场景切换),seek 后 alpha 无法解码(M0 新增) | M5 的 `verify` 检查"每个 Cues 指向的块,两路都是关键帧";M0 样本是固定 GOP,错位情况未测 |
 
 ### 13.2 待你决定的事项
