@@ -1,7 +1,9 @@
-// alphaclip: developer command-line tool for the core library (M1).
+// alphaclip: developer command-line tool for the core library (M1; --meta added in M4).
 //
-//   alphaclip info   <clip.webm>
-//   alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N]
+//   alphaclip info   <clip.webm> [--meta <clip.acmeta.json>]
+//   alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]
+//
+// --meta passes the sidecar metadata file to the core (see docs/m4-notes.md); without it the clip is "auto".
 //
 // `decode` writes every frame as planar Y, U, V (4:2:0, tightly packed) followed by the
 // A plane when the clip has alpha, i.e. the same layout as ffmpeg's raw yuv420p / yuva420p,
@@ -43,9 +45,9 @@ namespace {
 int Usage() {
   std::fprintf(stderr,
                "usage:\n"
-               "  alphaclip info   <clip.webm>\n"
-               "  alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N]\n"
-               "  alphaclip play   <clip.webm> --out <raw.yuv> [--clock-step-us N] [--depth N]\n"
+               "  alphaclip info   <clip.webm> [--meta <clip.acmeta.json>]\n"
+               "  alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]\n"
+               "  alphaclip play   <clip.webm> --out <raw.yuv> [--meta <json>] [--clock-step-us N] [--depth N]\n"
                "                   [--realtime-speed N] [--wait-end] [--wait-queue-full] [--loop]\n"
                "                   [--seek-us N] [--mid-seek-after N --mid-seek-us N]\n"
                "                   [--frames N] [--timeout-ms N]\n"
@@ -63,9 +65,48 @@ bool ParseInt64(const char* text, int64_t* out) {
   return true;
 }
 
-int CmdInfo(const char* path) {
+// --meta <file>: the sidecar metadata handed to ac_open_file (NULL when the option is not given).
+std::string g_meta_text;
+const char* g_meta = nullptr;
+
+bool LoadMeta(const char* path) {
+  std::FILE* f = std::fopen(path, "rb");
+  if (f == nullptr) {
+    std::fprintf(stderr, "error: cannot open the metadata file '%s'\n", path);
+    return false;
+  }
+  char buf[4096];
+  size_t n;
+  g_meta_text.clear();
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0 && g_meta_text.size() < (1u << 20)) {
+    g_meta_text.append(buf, n);
+  }
+  std::fclose(f);
+  g_meta = g_meta_text.c_str();  // an embedded NUL ends the text, as it would for any C caller
+  return true;
+}
+
+const char* AlphaModeName(int mode) {
+  switch (mode) {
+    case AC_ALPHA_OPAQUE: return "opaque";
+    case AC_ALPHA_PACKED_RIGHT: return "packed_right";
+    case AC_ALPHA_PACKED_BOTTOM: return "packed_bottom";
+    case AC_ALPHA_NATIVE: return "native_alpha";
+    default: return "unknown";
+  }
+}
+
+int CmdInfo(int argc, char** argv) {
+  const char* path = argv[2];
+  for (int i = 3; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--meta") == 0 && i + 1 < argc) {
+      if (!LoadMeta(argv[++i])) return 1;
+    } else {
+      return Usage();
+    }
+  }
   ac_player* p = nullptr;
-  if (ac_open_file(path, nullptr, &p) != AC_OK) {
+  if (ac_open_file(path, g_meta, &p) != AC_OK) {
     std::fprintf(stderr, "error: %s\n", ac_last_error(nullptr));
     return 1;
   }
@@ -82,6 +123,15 @@ int CmdInfo(const char* path) {
   std::printf("duration_us: %lld\n", static_cast<long long>(info.duration_us));
   std::printf("fps: %.3f\n", static_cast<double>(info.fps));
   std::printf("loop_period_us: %lld\n", static_cast<long long>(info.loop_period_us));
+  std::printf("alpha_mode: %s\n", AlphaModeName(info.alpha_mode));
+  std::printf("content: %dx%d\n", info.content_w, info.content_h);
+  std::printf("alpha_origin: %d,%d\n", info.alpha_x, info.alpha_y);
+  std::printf("premultiplied: %s\n", info.premultiplied ? "yes" : "no");
+  std::printf("color_range: %s\n", info.color_range == AC_RANGE_LIMITED ? "limited"
+                                   : info.color_range == AC_RANGE_FULL ? "full" : "unspecified");
+  std::printf("matrix: %s\n", info.matrix == AC_MATRIX_BT601 ? "bt601"
+                              : info.matrix == AC_MATRIX_BT709 ? "bt709" : "unspecified");
+  std::printf("loop_hint: %s\n", info.loop_hint ? "yes" : "no");
   ac_close(p);
   return 0;
 }
@@ -136,6 +186,8 @@ int CmdPlay(int argc, char** argv) {
       if (!ParseInt64(argv[++i], &realtime_speed) || realtime_speed < 1 || realtime_speed > 1000) {
         return Usage();
       }
+    } else if (std::strcmp(argv[i], "--meta") == 0 && i + 1 < argc) {
+      if (!LoadMeta(argv[++i])) return 1;
     } else if (std::strcmp(argv[i], "--wait-end") == 0) {
       wait_end = true;
     } else if (std::strcmp(argv[i], "--wait-queue-full") == 0) {
@@ -160,7 +212,7 @@ int CmdPlay(int argc, char** argv) {
   }
 
   ac_player* p = nullptr;
-  if (ac_open_file(path, nullptr, &p) != AC_OK) {
+  if (ac_open_file(path, g_meta, &p) != AC_OK) {
     std::fprintf(stderr, "error: %s\n", ac_last_error(nullptr));
     return 1;
   }
@@ -293,6 +345,8 @@ int CmdDecode(int argc, char** argv) {
       do_seek = true;
     } else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       if (!ParseInt64(argv[++i], &max_frames) || max_frames < 0) return Usage();
+    } else if (std::strcmp(argv[i], "--meta") == 0 && i + 1 < argc) {
+      if (!LoadMeta(argv[++i])) return 1;
     } else {
       return Usage();
     }
@@ -300,7 +354,7 @@ int CmdDecode(int argc, char** argv) {
   if (out_path == nullptr) return Usage();
 
   ac_player* p = nullptr;
-  if (ac_open_file(path, nullptr, &p) != AC_OK) {
+  if (ac_open_file(path, g_meta, &p) != AC_OK) {
     std::fprintf(stderr, "error: %s\n", ac_last_error(nullptr));
     return 1;
   }
@@ -363,7 +417,7 @@ int main(int argc, char** argv) {
     std::printf("alphaclip core %s\n", ac_version());
     return 0;
   }
-  if (argc >= 3 && std::strcmp(argv[1], "info") == 0 && argc == 3) return CmdInfo(argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "info") == 0) return CmdInfo(argc, argv);
   if (argc >= 3 && std::strcmp(argv[1], "decode") == 0) return CmdDecode(argc, argv);
   if (argc >= 3 && std::strcmp(argv[1], "play") == 0) return CmdPlay(argc, argv);
   return Usage();

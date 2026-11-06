@@ -31,7 +31,7 @@ namespace AlphaClip
     }
 
     // The three structs cross the ABI by layout. The C++ side locks it with static_asserts
-    // (core/src/api.cpp: 48 / 72 / 40 bytes on 64-bit targets); AcNative.CheckLayout() verifies it again at runtime.
+    // (core/src/api.cpp: 80 / 72 / 40 bytes on 64-bit targets); AcNative.CheckLayout() verifies it again at runtime.
     [StructLayout(LayoutKind.Sequential)]
     internal struct AcInfo
     {
@@ -41,6 +41,13 @@ namespace AlphaClip
         public int HasAlphaPlane;
         public long PacketCount;
         public long LoopPeriodUs;
+        public int AlphaMode;       // ac_alpha_mode: 0 opaque, 1 packed_right, 2 packed_bottom, 3 native_alpha
+        public int Premultiplied;
+        public int ColorRange;      // 0 unspecified, 1 limited, 2 full
+        public int Matrix;          // 0 unspecified, 1 bt601, 2 bt709
+        public int LoopHint;
+        public int AlphaX, AlphaY;  // packed modes: top-left of the alpha image in the coded frame
+        public int Reserved;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -66,8 +73,9 @@ namespace AlphaClip
         private const string Lib = "alphaclip";
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr ac_version();
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_open_memory(IntPtr data, UIntPtr len, IntPtr metaJson, out IntPtr player);
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_open_file(byte[] utf8Path, IntPtr metaJson, out IntPtr player);
+        // metaJson: a NUL-terminated UTF-8 byte array, or null for "no sidecar" (marshalled as a pointer to the array / NULL).
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_open_memory(IntPtr data, UIntPtr len, byte[] metaJson, out IntPtr player);
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_open_file(byte[] utf8Path, byte[] metaJson, out IntPtr player);
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_get_info(IntPtr player, out AcInfo info);
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_seek(IntPtr player, long ptsUs);
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int ac_set_queue_depth(IntPtr player, int depth);
@@ -87,10 +95,10 @@ namespace AlphaClip
 
         public static void CheckLayout()
         {
-            if (Marshal.SizeOf<AcInfo>() != 48 || Marshal.SizeOf<AcFrame>() != 72 || Marshal.SizeOf<AcStats>() != 40)
+            if (Marshal.SizeOf<AcInfo>() != 80 || Marshal.SizeOf<AcFrame>() != 72 || Marshal.SizeOf<AcStats>() != 40)
             {
                 throw new InvalidOperationException(
-                    "AlphaClip: the managed struct layout does not match the native ABI (expected 48/72/40 bytes, got " +
+                    "AlphaClip: the managed struct layout does not match the native ABI (expected 80/72/40 bytes, got " +
                     Marshal.SizeOf<AcInfo>() + "/" + Marshal.SizeOf<AcFrame>() + "/" + Marshal.SizeOf<AcStats>() + ").");
             }
         }
@@ -114,18 +122,24 @@ namespace AlphaClip
             }
         }
 
-        /// <summary>Opens a clip from native memory. The memory is NOT copied by the core: it must stay valid until Close.</summary>
-        public static IntPtr OpenMemory(IntPtr data, int length)
+        // The sidecar travels as NUL-terminated UTF-8; null or "" means no sidecar.
+        private static byte[] MetaBytes(string metaJson)
         {
-            Check(ac_open_memory(data, (UIntPtr)(uint)length, IntPtr.Zero, out IntPtr player), IntPtr.Zero, "ac_open_memory");
+            return string.IsNullOrEmpty(metaJson) ? null : Encoding.UTF8.GetBytes(metaJson + "\0");
+        }
+
+        /// <summary>Opens a clip from native memory. The memory is NOT copied by the core: it must stay valid until Close.</summary>
+        public static IntPtr OpenMemory(IntPtr data, int length, string metaJson = null)
+        {
+            Check(ac_open_memory(data, (UIntPtr)(uint)length, MetaBytes(metaJson), out IntPtr player), IntPtr.Zero, "ac_open_memory");
             Interlocked.Increment(ref s_opened);
             return player;
         }
 
-        public static IntPtr OpenFile(string path)
+        public static IntPtr OpenFile(string path, string metaJson = null)
         {
             byte[] utf8 = Encoding.UTF8.GetBytes(path + "\0");
-            Check(ac_open_file(utf8, IntPtr.Zero, out IntPtr player), IntPtr.Zero, "ac_open_file");
+            Check(ac_open_file(utf8, MetaBytes(metaJson), out IntPtr player), IntPtr.Zero, "ac_open_file");
             Interlocked.Increment(ref s_opened);
             return player;
         }

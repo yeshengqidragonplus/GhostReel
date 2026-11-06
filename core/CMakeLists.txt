@@ -31,6 +31,8 @@ add_library(alphaclip_core STATIC
   src/api.cpp
   src/clip.cpp
   src/demuxer.cpp
+  src/json.cpp
+  src/meta.cpp
   src/player.cpp
   src/vp9_decoder.cpp)
 target_include_directories(alphaclip_core
@@ -61,6 +63,8 @@ if(AC_BUILD_SHARED)
     src/api.cpp
     src/clip.cpp
     src/demuxer.cpp
+    src/json.cpp
+    src/meta.cpp
     src/player.cpp
     src/vp9_decoder.cpp)
   target_compile_definitions(alphaclip_shared PRIVATE AC_BUILDING_SHARED)

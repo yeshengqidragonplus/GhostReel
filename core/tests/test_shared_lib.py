@@ -22,7 +22,10 @@ AC_OK, AC_AGAIN, AC_ERR_IO, AC_ERR_FORMAT, AC_ERR_UNSUPPORTED, AC_ERR_DECODE, AC
 class Info(C.Structure):
     _fields_ = [("width", C.c_int32), ("height", C.c_int32), ("content_w", C.c_int32), ("content_h", C.c_int32),
                 ("duration_us", C.c_int64), ("fps", C.c_float), ("has_alpha_plane", C.c_int32),
-                ("packet_count", C.c_int64), ("loop_period_us", C.c_int64)]
+                ("packet_count", C.c_int64), ("loop_period_us", C.c_int64),
+                ("alpha_mode", C.c_int32), ("premultiplied", C.c_int32), ("color_range", C.c_int32),
+                ("matrix", C.c_int32), ("loop_hint", C.c_int32), ("alpha_x", C.c_int32), ("alpha_y", C.c_int32),
+                ("reserved", C.c_int32)]
 
 
 class Frame(C.Structure):
@@ -207,7 +210,7 @@ def test_errors(lib, work):
     check(lib.ac_open_memory(junk, len(junk), None, C.byref(p)) == AC_ERR_FORMAT, "garbage -> AC_ERR_FORMAT")
     check(len(lib.ac_last_error(None) or b"") > 0, "ac_last_error(NULL) has the text of the failed open")
     check(lib.ac_open_file(os.path.join(work, "missing.webm").encode(), None, C.byref(p)) == AC_ERR_IO, "missing file -> AC_ERR_IO")
-    check(lib.ac_open_memory(junk, len(junk), b"{}", C.byref(p)) == AC_ERR_UNSUPPORTED, "non-empty meta_json -> AC_ERR_UNSUPPORTED")
+    check(lib.ac_open_memory(junk, len(junk), b"{}", C.byref(p)) == AC_ERR_FORMAT, "meta_json without a schema -> AC_ERR_FORMAT (the sidecar is checked before the file; test_meta.py has the full matrix)")
     lib.ac_close(None)  # must be a no-op
     check(True, "ac_close(NULL) is a no-op")
     check(lib.ac_get_info(None, None) == AC_ERR_ARG, "null player -> AC_ERR_ARG")
@@ -223,7 +226,7 @@ def main():
     a = ap.parse_args()
     work = os.path.abspath(a.workdir)
     os.makedirs(work, exist_ok=True)
-    check(C.sizeof(Info) == 48 and C.sizeof(Frame) == 72 and C.sizeof(Stats) == 40, "ctypes struct sizes match the ABI (48 / 72 / 40)",
+    check(C.sizeof(Info) == 80 and C.sizeof(Frame) == 72 and C.sizeof(Stats) == 40, "ctypes struct sizes match the ABI (80 / 72 / 40)",
           (C.sizeof(Info), C.sizeof(Frame), C.sizeof(Stats)))
     lib = load(os.path.abspath(a.dll))
     check(lib.ac_version().startswith(b"0."), f"ac_version: {lib.ac_version().decode()}")

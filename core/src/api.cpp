@@ -20,17 +20,22 @@
 #include "alphaclip.h"
 #include "clip.h"
 #include "common.h"
+#include "meta.h"
 #include "player.h"
 
 // The structs below cross the ABI by value layout: the engine bindings (C# P/Invoke, GDExtension,
 // Cocos) declare the same layout by hand. Lock it here so that a change breaks the build instead
 // of silently corrupting memory. (64-bit targets only: Windows x86_64, Android arm64.)
 #if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
-static_assert(sizeof(ac_info) == 48 && offsetof(ac_info, width) == 0 && offsetof(ac_info, height) == 4 &&
+static_assert(sizeof(ac_info) == 80 && offsetof(ac_info, width) == 0 && offsetof(ac_info, height) == 4 &&
                   offsetof(ac_info, content_w) == 8 && offsetof(ac_info, content_h) == 12 &&
                   offsetof(ac_info, duration_us) == 16 && offsetof(ac_info, fps) == 24 &&
                   offsetof(ac_info, has_alpha_plane) == 28 && offsetof(ac_info, packet_count) == 32 &&
-                  offsetof(ac_info, loop_period_us) == 40,
+                  offsetof(ac_info, loop_period_us) == 40 && offsetof(ac_info, alpha_mode) == 48 &&
+                  offsetof(ac_info, premultiplied) == 52 && offsetof(ac_info, color_range) == 56 &&
+                  offsetof(ac_info, matrix) == 60 && offsetof(ac_info, loop_hint) == 64 &&
+                  offsetof(ac_info, alpha_x) == 68 && offsetof(ac_info, alpha_y) == 72 &&
+                  offsetof(ac_info, reserved) == 76,
               "ac_info layout changed: update every binding");
 static_assert(sizeof(ac_frame) == 72 && offsetof(ac_frame, plane) == 0 && offsetof(ac_frame, stride) == 32 &&
                   offsetof(ac_frame, width) == 48 && offsetof(ac_frame, height) == 52 &&
@@ -49,6 +54,8 @@ struct ac_player {
   std::vector<uint8_t> owned;  // file contents when opened with ac_open_file
   std::unique_ptr<ac::Clip> clip;  // moved into `player` by ac_start
   ac::ClipInfo info;
+  ac::Meta meta;               // the sidecar (present == false: none was given)
+  ac::Layout layout;           // what the sidecar means for this file
   ac::FrameBuffer frame;       // the frame handed out by ac_decode_next
   std::string last_error;
   int depth = ac::Player::kDefaultDepth;
@@ -130,28 +137,28 @@ void FillFrame(const ac::FrameBuffer& f, ac_frame* out) {
   out->flags = 0;
 }
 
-void CheckMeta(const char* meta_json) {
-  if (meta_json != nullptr && meta_json[0] != '\0') {
-    throw ac::Failure(AC_ERR_UNSUPPORTED,
-                      "sidecar metadata is not supported yet; pass NULL as meta_json");
-  }
+// Parses the clip and applies the (already parsed) sidecar to it. `data` must stay valid for the player's life.
+void OpenClip(ac_player* p, const uint8_t* data, size_t len, const ac::Meta& meta) {
+  p->clip = ac::Clip::Open(data, len, ac::MetaIgnoresAlphaStream(meta));
+  p->info = p->clip->info();
+  p->meta = meta;
+  p->layout = ac::ResolveLayout(meta, p->info.width, p->info.height, p->info.stream_has_alpha);
 }
 
 }  // namespace
 
 extern "C" {
 
-const char* ac_version(void) { return "0.1.0-m1"; }
+const char* ac_version(void) { return "0.1.0-m4"; }
 
 ac_status ac_open_memory(const uint8_t* data, size_t len, const char* meta_json, ac_player** out) {
   if (out == nullptr) return Fail(nullptr, AC_ERR_ARG, "ac_open_memory: out is null");
   *out = nullptr;
   if (data == nullptr || len == 0) return Fail(nullptr, AC_ERR_ARG, "ac_open_memory: data is empty");
   return Guard(nullptr, [&]() -> ac_status {
-    CheckMeta(meta_json);
+    const ac::Meta meta = ac::ParseMeta(meta_json);
     std::unique_ptr<ac_player> p(new ac_player());
-    p->clip = ac::Clip::Open(data, len);
-    p->info = p->clip->info();
+    OpenClip(p.get(), data, len, meta);
     *out = p.release();
     return AC_OK;
   });
@@ -162,7 +169,7 @@ ac_status ac_open_file(const char* path, const char* meta_json, ac_player** out)
   *out = nullptr;
   if (path == nullptr || path[0] == '\0') return Fail(nullptr, AC_ERR_ARG, "ac_open_file: path is empty");
   return Guard(nullptr, [&]() -> ac_status {
-    CheckMeta(meta_json);
+    const ac::Meta meta = ac::ParseMeta(meta_json);  // before reading a possibly large file
     std::FILE* f = OpenUtf8(path);
     if (f == nullptr) throw ac::Failure(AC_ERR_IO, std::string("cannot open '") + path + "'");
     std::unique_ptr<ac_player> p(new ac_player());
@@ -174,8 +181,7 @@ ac_status ac_open_file(const char* path, const char* meta_json, ac_player** out)
     }
     std::fclose(f);
     if (p->owned.empty()) throw ac::Failure(AC_ERR_FORMAT, "the file is empty");
-    p->clip = ac::Clip::Open(p->owned.data(), p->owned.size());
-    p->info = p->clip->info();
+    OpenClip(p.get(), p->owned.data(), p->owned.size(), meta);
     *out = p.release();
     return AC_OK;
   });
@@ -185,15 +191,25 @@ ac_status ac_get_info(ac_player* player, ac_info* out) {
   if (player == nullptr || out == nullptr) return Fail(player, AC_ERR_ARG, "ac_get_info: null argument");
   return Guard(player, [&]() -> ac_status {
     const ac::ClipInfo& i = player->info;
+    const ac::Layout& l = player->layout;
+    const ac::Meta& m = player->meta;
+    std::memset(out, 0, sizeof(*out));
     out->width = i.width;
     out->height = i.height;
-    out->content_w = i.width;
-    out->content_h = i.height;
+    out->content_w = l.content_w;
+    out->content_h = l.content_h;
     out->duration_us = i.duration_us;
     out->fps = static_cast<float>(i.fps);
     out->has_alpha_plane = i.has_alpha ? 1 : 0;
     out->packet_count = static_cast<int64_t>(i.packet_count);
     out->loop_period_us = i.loop_period_us;
+    out->alpha_mode = l.alpha_mode;
+    out->premultiplied = m.premultiplied ? 1 : 0;
+    out->color_range = m.color_range;
+    out->matrix = m.matrix;
+    out->loop_hint = m.loop_hint ? 1 : 0;
+    out->alpha_x = l.alpha_x;
+    out->alpha_y = l.alpha_y;
     return AC_OK;
   });
 }

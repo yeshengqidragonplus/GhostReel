@@ -21,3 +21,7 @@ bindings/unity/package/Runtime/Plugins.meta
 # the demo scene copies the sample clip here (Create Demo Scene menu); not committed
 bindings/unity/TestProject/Assets/StreamingAssets/
 bindings/unity/TestProject/Assets/StreamingAssets.meta
+
+# Python bytecode (tests import each other)
+__pycache__/
+*.pyc

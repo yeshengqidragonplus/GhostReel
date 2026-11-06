@@ -8,6 +8,8 @@
 # The project colour space (-ColorSpace) and render pipeline (-Pipeline Builtin|URP) are switched first when they
 # differ (a separate editor start: the change only takes effect after a restart). Close any editor that has this
 # project open first.
+# -AlphaClips "a.webm;b.webm" -Truth truth.raw (M4, samples\m4) add the transparency tests: each clip is composited over
+# backgrounds in a camera and compared with exact RGBA ground truth, with negative controls for the dark-rim check.
 # With -PlayClip <clip.webm> the play-mode tests run instead (the real component lifecycle, Update-driven
 # playback, OnDestroy): the editor enters play mode, so it is started without -quit and the test driver exits it.
 # With -Demo the demo scene is (re)created from the menu code and played for a moment; -SnapshotDir <dir> makes the
@@ -21,6 +23,8 @@ param(
   [ValidateSet('Gamma', 'Linear')][string]$ColorSpace = 'Gamma',
   [ValidateSet('Builtin', 'URP')][string]$Pipeline = 'Builtin',
   [string]$Pairs = '',
+  [string]$AlphaClips = '',   # M4: "a.webm;b.webm;..." (sidecars next to them) shown over backgrounds and compared with -Truth
+  [string]$Truth = '',        # M4: samples\m4\truth_rgba_3f.raw
   [string]$PlayClip = '',
   [switch]$Demo,
   [switch]$OfflineGuard,
@@ -81,6 +85,8 @@ Remove-Item $report -ErrorAction SilentlyContinue
 $log = Join-Path $WorkDir 'unity_tests.log'
 $extra = @('-acExpectPipeline', $Pipeline)
 if ($SnapshotDir) { New-Item -ItemType Directory -Force $SnapshotDir | Out-Null; $extra += @('-acSnapshotDir', "`"$SnapshotDir`"") }
+if ($AlphaClips) { $extra += @('-acAlphaClips', "`"$AlphaClips`"") }
+if ($Truth) { $extra += @('-acTruth', "`"$Truth`"") }
 if ($Demo) {
   $rc = Invoke-Unity @('-executeMethod', 'AlphaClip.Tests.DemoScene.CreateBatch') (Join-Path $WorkDir 'unity_demo_create.log')
   if ($rc -ne 0) { Write-Host "creating the demo scene failed ($rc), see unity_demo_create.log"; exit 3 }

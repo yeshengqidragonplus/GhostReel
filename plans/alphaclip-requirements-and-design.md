@@ -1,6 +1,6 @@
 # AlphaClip(暂定名)— 跨引擎透明视频插件:需求与设计方案
 
-- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md);M2 完成后在 §9.1、§11、§13 补了「M2」标注,见 [M2 结论](../docs/m2-conclusion.md);M3 完成后在 §3、§9.1、§11、§13 补了「M3」标注,见 [M3 结论](../docs/m3-conclusion.md))
+- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md);M2 完成后在 §9.1、§11、§13 补了「M2」标注,见 [M2 结论](../docs/m2-conclusion.md);M3 完成后在 §3、§9.1、§11、§13 补了「M3」标注,见 [M3 结论](../docs/m3-conclusion.md);M4 完成后在 §6.3、§7.2、§8.2、§9.1、§11、§13.1 补了「M4」标注,见 [M4 结论](../docs/m4-conclusion.md))
 - 用途:作为新项目的起点文档。新项目里把本文件放进 `docs/`,让 Claude 先读它再动手。
 - 开发节奏:**小步慢做,每个里程碑独立可验证、可随时暂停**(见第 11 节)。
 - 范围:一套 C++ 核心 + Unity / Godot 4 / Cocos Creator 3.x 三个薄绑定 + 离线制作工具。
@@ -162,6 +162,10 @@ clip.aclut.png         查找表(仅 keyed 模式)
 
 字段名和含义在 M1 之后可能调整,**以核心库的 schema 校验为准**。
 
+> **M4:** schema 1 已在核心里实现,字段表、默认值和每条规则见 `docs/m4-notes.md`。与上面草案的差异:① sidecar 可选(没有时是"auto":文件带 alpha 流就按 `native_alpha`,否则 `opaque`),工具(M5)总会写它;
+> ② `premultiplied` 定义为"视频里的颜色**已经**乘过 alpha"(默认 `false`);③ `color_range` / `matrix` 没写时由绑定自己的设置决定,写了就优先;④ `alpha_mode: keyed` 和非零的 `edge` 返回 `AC_ERR_UNSUPPORTED`(M7),
+> 其他不认识的键忽略、重复的键拒绝;⑤ packed 的 alpha 图存成**亮度**(和颜色用同一个 `color_range`),`content_size` 必须是偶数;⑥ `opaque` 不解码文件里的 alpha 流,`packed_*` 的文件带 alpha 流则拒绝。
+
 ## 7. 核心库设计(C++17,C ABI)
 
 ### 7.1 依赖
@@ -216,6 +220,10 @@ void ac_close(ac_player*);
 > `ac_set_queue_depth`、`ac_set_loop`、`ac_get_stats`(解码帧数、丢帧数、解码线程耗时等,即 NFR-1 的指标);状态码新增 `AC_END` 和 `AC_ERR_ARG`;
 > `ac_info` 新增 `packet_count`、`loop_period_us`;`meta_json` 暂不支持(传非空返回 `AC_ERR_UNSUPPORTED`,M4 再做)。
 > 完整的决定和理由见 `docs/m1-notes.md`。
+>
+> **M4:** `meta_json` 已实现(见 §6.3 的 M4 注):`NULL` 或 `""` = 无 sidecar,非法的返回 `AC_ERR_FORMAT`,核心不支持的返回 `AC_ERR_UNSUPPORTED`,sidecar 在读文件之前检查;
+> `ac_info` 扩到 80 字节,在末尾追加 `alpha_mode`、`premultiplied`、`color_range`、`matrix`、`loop_hint`、`alpha_x`、`alpha_y`、`reserved`,`content_w/h` 是真值,`has_alpha_plane` 仅在 `native_alpha` 为 1;
+> `ac_frame` 不变(packed 模式下仍是整个编码帧,裁剪是着色器的事)。决定见 `docs/m4-notes.md`。
 
 ### 7.3 线程与时钟
 
@@ -246,6 +254,10 @@ void ac_close(ac_player*);
 2. 透明还原:`packed_*` 读另一半画面的灰度;`native_alpha` 读 A 平面;`keyed` 读查找表。
 3. 输出预乘 alpha(混合模式为 `One OneMinusSrcAlpha`)。
 4. 可选边缘后处理(收缩、羽化、去噪),放在单独一遍里,默认关闭。
+
+> **M4:** 第 1–3 项做在一个着色器里(Unity 手写版本)。输出是**预乘 RGBA**;Gamma 项目里直通色乘 alpha、预乘色原样输出并限制在 ≤ alpha,Linear 项目里在线性值上预乘(预乘色先除掉 alpha 再转线性再乘回去),
+> 在线性帧缓冲里混合。packed 的 alpha 读另一半画面的**亮度**(同一个 `color_range`),`native_alpha` 读 A 平面(全范围);packed 下色度查找被限制在画面自己的色度样本内,否则灰色 alpha 图会渗进颜色边缘。
+> 第 4 项和 `keyed` 还没有(M7)。细节见 `docs/m4-notes.md`。
 
 ### 8.3 一份源,多端生成
 
@@ -287,6 +299,10 @@ void ac_close(ac_player*);
 > **M3:** Android 上 StreamingAssets 在 APK 里,组件用 `UnityWebRequest` 读出字节再 `Open(byte[])`(来源含 `://` 时自动走,`OpenUriAsync` / `OpenStreamingAssetsAsync`),整个文件进内存;
 > 包因此依赖 `com.unity.modules.unitywebrequest`。上面"多一张贴图、每个新帧一次全屏绘制"在 Pixel 6a、640×360 下实测不成问题(上传 0.23 ms + 绘制提交 0.13 ms/张画面,CPU 侧),所以没有改;1080p 没有量。
 > 基线用的是"没固定核"的应用内基准,和 M1 固定核的表不是同一个实验。决定和方法见 `docs/m3-notes.md`。
+>
+> **M4:** `Output` 现在是**预乘 RGBA**,尺寸是画面尺寸(packed 下比编码帧小)。sidecar 的来源有四种:显式文本、同名 `.acmeta.json` 文件(`OpenFile`)、`TextAsset`(组件的 `MetaAsset`)、
+> 同位置的 URI(`OpenUriAsync`,Android 的 APK 里同样适用,没有就当没有);sidecar 里的矩阵和范围优先于组件设置。新增两个预乘混合的着色器(场景用 `AlphaClip/UnlitPremultiplied`、UGUI 用 `AlphaClip/UIPremultiplied`)
+> 和 `AlphaClipMaterials`;**没有做 UI 绑定组件**(`RawImage` 的用法写在 README 里)。决定见 `docs/m4-notes.md`。
 
 ### 9.2 Godot 4
 
@@ -334,7 +350,7 @@ void ac_close(ac_player*);
 | **M1 核心解码** ✅ | 核心库 + 命令行小工具:WebM → 逐帧输出 YUV(PNG 推到 M4,需要 sidecar 里的矩阵和范围)。含 seek 和循环的时钟逻辑(打开时建完整包索引,seek 不依赖 Cues) | 与 ffmpeg 参考输出逐帧一致(alpha 的参考输出要用 `-c:v libvpx-vp9`)。**已完成(2026-11-05),结论见 `docs/m1-conclusion.md`** |
 | **M2 Unity 编辑器原型** ✅ | Windows 编辑器里播放不透明视频(核心的 Windows 共享库 + Unity 包;内置管线和 URP) | 画面正确、能循环、不泄漏。**已完成(2026-11-05),结论见 `docs/m2-conclusion.md`**(2022.3.62f2 和 6000.3.2f1;HDRP、Windows 播放器构建未测) |
 | **M3 Android 真机** ✅ | 同一套代码在 Pixel 6a 上播放;记录性能基线 | 真机播放正确,基线数据入库。**已完成(2026-11-06),结论见 `docs/m3-conclusion.md`**(Unity 2022.3.62f2 开发构建,Pixel 6a / Android 15;画面与 Windows 编辑器最大差 1,丢帧 0,基线未固定核;Unity 6 上的 Android、AAB / Play 16 KB 检查、16 KB 页设备、固定核基线未做) |
-| **M4 透明(基础)** | `packed_right`/`packed_bottom` + `native_alpha`,预乘输出 | 在 UI 和场景里叠加无黑边 |
+| **M4 透明(基础)** ✅ | `packed_right`/`packed_bottom` + `native_alpha`,预乘输出 | 在 UI 和场景里叠加无黑边。**已完成(2026-11-06),结论见 `docs/m4-conclusion.md`**(Windows 编辑器,2022.3.62f2,内置管线和 URP,Gamma 和 Linear,场景和 UI 两条路径,对精确真值带负向对照;Pixel 6a 上的 M4、Unity 6、HDRP、`keyed`、边缘后处理、"直通色 + 透明处填黑"的素材未做) |
 | **M5 制作工具** | `encode` / `inspect` / `verify` 命令行 | 一条命令把素材变成可播放的包 |
 | **M6 预览页** | 本地 WebGL 预览,和 Unity 渲染对比 | 预览与引擎结果肉眼一致 |
 | **M7 边缘与 keyed** | 边缘后处理;绿幕 + 查找表抠图与生成器 | 质量指标达标,有对比图 |
@@ -359,7 +375,7 @@ void ac_close(ac_player*);
 |---|---|---|
 | R1 | 软解 VP9 在低端 Android 上吃不消 | M3 建立基线;限制分辨率和并发;后期加 MediaCodec 通道。**M0/M1 数据点:** Pixel 6a、640×360、单线程,核心库解码线程(彩色加 alpha,含平面拷贝)约 1.1–1.4 ms/帧(大核)、2.2–2.4(中核)、4.4–4.8(小核);alpha 片比不透明片多约 40%;同一类核上单帧耗时就有 ±25% 的抖动,基线必须固定核、多次重复、记录频率和温度;目标规格未定,不要外推(见 docs/m1-conclusion.md)。**M3 数据点:** 应用内、未固定核、同一台手机、640×360:解码线程 4.7 ms/帧(不透明)、6.3(alpha 片),比 M1 固定小核的数慢约 1.4 倍(推断是调度器放在了小核且频率较低,没有记录运行期间的核和频率);固定核基线还没做(见 docs/m3-conclusion.md) |
 | R2 | ~~libvpx 读不到 WebM 原生 alpha,或行为不稳定~~ | **已关闭(M0,2026-11-05):** `native_alpha` 可行,见 `docs/m0-conclusion.md`。残留的关键帧对齐问题见 R10 |
-| R3 | Unity Linear 色彩空间下抠边偏色 | 着色器里显式处理转换;黄金图覆盖两种色彩空间。**M2:** 不透明的 YUV→RGB 路径在 Gamma 和 Linear 工程下读回都与独立 CPU 参考最大差 1(着色器按 `QualitySettings.activeColorSpace` 自动处理);`keyed` 的抠边路径还没做 |
+| R3 | Unity Linear 色彩空间下抠边偏色 | 着色器里显式处理转换;黄金图覆盖两种色彩空间。**M2:** 不透明的 YUV→RGB 路径在 Gamma 和 Linear 工程下读回都与独立 CPU 参考最大差 1(着色器按 `QualitySettings.activeColorSpace` 自动处理);`keyed` 的抠边路径还没做。**M4:** 透明合成在 Gamma 和 Linear 下都对精确 RGBA 真值验证过(半透明边缘带符号均值在 ±0.15 个灰度级以内,三个负向对照 −19…+21 / −6…+14),Linear 下在线性空间预乘、在线性帧缓冲混合;"直通色、透明处填黑"的素材没测过 |
 | R4 | 三个引擎的纹理上传接口细节和版本差异 | 每个引擎只做薄层;API 名称实现时核对官方文档 |
 | R5 | Android 16 KB 页大小等平台新要求 | M3 时按 Google 官方最新文档核对并用对应 NDK 构建。**M0:** NDK r30 默认 16 KB 对齐(已验证 ELF 段对齐);APK 内 zip 对齐和 Play 检查留到 M3;Unity 2022.3 需 ≥ 2022.3.56f1 且 Burst ≥ 1.8.21。**M3:** ELF 层已验证(`.so` 与 APK 里 Unity 自己的库都是 0x4000);zip 对齐只在压缩存放的开发 APK 上通过,AAB / Play Console 检查未做 |
 | R6 | `keyed` 抠图质量上限不明 | 放在 M7,先用并排/原生 alpha 打通主链路 |

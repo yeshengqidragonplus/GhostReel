@@ -28,7 +28,8 @@ struct ClipInfo {
   int height = 0;
   int64_t duration_us = 0;
   double fps = 0;
-  bool has_alpha = false;
+  bool has_alpha = false;         // the alpha stream is decoded: frames carry a 4th plane
+  bool stream_has_alpha = false;  // the file carries an alpha stream (decoded or not)
   size_t packet_count = 0;
   int64_t first_pts_us = 0;
   // pts added to every frame of the next pass when looping: (last pts - first pts) plus one
@@ -39,7 +40,9 @@ struct ClipInfo {
 class Clip {
  public:
   // `data` must outlive the Clip (it is not copied). Throws ac::Failure.
-  static std::unique_ptr<Clip> Open(const uint8_t* data, size_t size);
+  // `ignore_alpha`: do not decode (or validate) an alpha stream the file may carry; ClipInfo::stream_has_alpha
+  // still says whether there is one.
+  static std::unique_ptr<Clip> Open(const uint8_t* data, size_t size, bool ignore_alpha = false);
 
   const ClipInfo& info() const { return info_; }
 

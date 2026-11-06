@@ -20,7 +20,7 @@ namespace AlphaClip.Tests
     ///  * creating and destroying players does not leak.
     /// Arguments: -acPairs "clip.webm|clip.raw;..." -acExpectColorSpace Gamma|Linear -acReport out.txt
     /// </summary>
-    public static class EditModeTests
+    public static partial class EditModeTests
     {
         private static readonly StringBuilder Report = new StringBuilder();
         private static int s_checks, s_failures;
@@ -92,6 +92,11 @@ namespace AlphaClip.Tests
             {
                 ConsumerTest(first[0], first[1], "Universal Render Pipeline/Unlit");
             }
+            string alphaClips = BatchTests.Arg("-acAlphaClips");
+            if (!string.IsNullOrEmpty(alphaClips))
+            {
+                AlphaTests(alphaClips.Split(';'), BatchTests.Arg("-acTruth"));
+            }
             LeakTest(firstClip, 200, false);
         }
 
@@ -138,7 +143,7 @@ namespace AlphaClip.Tests
                         Diff d = default;
                         if (got)
                         {
-                            CompareFrame(ReadBack(player.Output), raw, 0, w, h, ColorMatrix.BT601, false, ChromaSiting.Left, ref d);
+                            CompareFrame(ReadBack(player.Output), raw, 0, info, ColorMatrix.BT601, false, ChromaSiting.Left, ref d);
                         }
                         Check(got && player.LastPtsUs == 0 && d.Total > 0 && d.Max <= 6 && d.Over2 * 1000 <= d.Total,
                             how + ": the first picture equals the reference (max diff " + d.Max + ")");
@@ -292,8 +297,9 @@ namespace AlphaClip.Tests
                 player.Matrix = ColorMatrix.BT601;
                 player.OpenFile(clip);
                 AlphaClipInfo info = player.Info;
-                int w = info.Width, h = info.Height, cw = (w + 1) / 2, ch = (h + 1) / 2;
-                int frameBytes = w * h + 2 * cw * ch + (info.HasAlpha ? w * h : 0);
+                int cw = (info.Width + 1) / 2, ch = (info.Height + 1) / 2;
+                int frameBytes = info.Width * info.Height + 2 * cw * ch + (info.HasAlphaPlane ? info.Width * info.Height : 0);
+                int w = info.ContentWidth, h = info.ContentHeight;   // the picture's size: what Output (and the camera view) has
                 byte[] raw = File.ReadAllBytes(rawPath);
                 WaitFor(() => player.GetStats().ReachedEnd, 15000);
                 int shown = 0;
@@ -330,7 +336,9 @@ namespace AlphaClip.Tests
 
                 Diff d = default;
                 byte[] rgba = ReadBack(target);
-                CompareFrame(rgba, raw, (shown - 1) * frameBytes, w, h, ColorMatrix.BT601, false, ChromaSiting.Left, ref d);
+                // A plain Unlit/Texture shader draws the premultiplied colour as it is; whether the target keeps the alpha
+                // channel depends on the pipeline, so only the colour is compared here.
+                CompareFrame(rgba, raw, (shown - 1) * frameBytes, info, ColorMatrix.BT601, false, ChromaSiting.Left, ref d, false);
                 ReportDiff(name + " (frame " + (shown - 1) + ")", d);
                 string snapshotDir = BatchTests.Arg("-acSnapshotDir");
                 if (snapshotDir != null)
@@ -379,12 +387,12 @@ namespace AlphaClip.Tests
                 AlphaClipInfo info = player.Info;
                 int w = info.Width, h = info.Height, n = (int)info.PacketCount;
                 int cw = (w + 1) / 2, ch = (h + 1) / 2;
-                int frameBytes = w * h + 2 * cw * ch + (info.HasAlpha ? w * h : 0);
+                int frameBytes = w * h + 2 * cw * ch + (info.HasAlphaPlane ? w * h : 0);
                 byte[] raw = File.ReadAllBytes(rawPath);
                 Check(raw.Length == frameBytes * n, name + ": reference raw has " + n + " frames of " + frameBytes + " bytes",
                     raw.Length.ToString());
-                Check(player.Output != null && player.Output.width == w && player.Output.height == h,
-                    name + ": Output is a " + w + "x" + h + " RenderTexture");
+                Check(player.Output != null && player.Output.width == info.ContentWidth && player.Output.height == info.ContentHeight,
+                    name + ": Output is a " + info.ContentWidth + "x" + info.ContentHeight + " RenderTexture (" + info.AlphaMode + ")");
 
                 WaitFor(() => player.GetStats().ReachedEnd, 15000);
                 var pts = new List<long>();
@@ -400,7 +408,7 @@ namespace AlphaClip.Tests
                     }
                     presentTicks += Stopwatch.GetTimestamp() - t0;
                     pts.Add(player.LastPtsUs);
-                    CompareFrame(ReadBack(player.Output), raw, (pts.Count - 1) * frameBytes, w, h, matrix, fullRange, siting, ref total);
+                    CompareFrame(ReadBack(player.Output), raw, (pts.Count - 1) * frameBytes, info, matrix, fullRange, siting, ref total);
                 }
                 Check(pts.Count == n, name + ": " + n + " frames presented, each once", pts.Count.ToString());
                 if (pts.Count > 0)
@@ -413,7 +421,7 @@ namespace AlphaClip.Tests
 
                 if (alsoSeek && pts.Count == n)
                 {
-                    SeekTest(player, name, raw, frameBytes, w, h, pts, matrix, fullRange, siting);
+                    SeekTest(player, name, raw, frameBytes, info, pts, matrix, fullRange, siting);
                 }
             }
             finally
@@ -431,7 +439,7 @@ namespace AlphaClip.Tests
             Check(ok, label + " (mean |diff| " + mean.ToString("F3") + ", max " + d.Max + ", >2: " + d.Over2 + " of " + d.Total + ", >6: " + d.Over6 + ")");
         }
 
-        private static void SeekTest(AlphaClipPlayer player, string name, byte[] raw, int frameBytes, int w, int h,
+        private static void SeekTest(AlphaClipPlayer player, string name, byte[] raw, int frameBytes, AlphaClipInfo info,
             List<long> pts, ColorMatrix matrix, bool fullRange, ChromaSiting siting)
         {
             foreach (double seconds in new[] { 1.0, 0.5, 1.2, 0.0, 100.0 })
@@ -455,7 +463,7 @@ namespace AlphaClip.Tests
                 Diff d = default;
                 if (got)
                 {
-                    CompareFrame(ReadBack(player.Output), raw, j * frameBytes, w, h, matrix, fullRange, siting, ref d);
+                    CompareFrame(ReadBack(player.Output), raw, j * frameBytes, info, matrix, fullRange, siting, ref d);
                 }
                 Check(got && player.LastPtsUs == pts[j] && d.Total > 0 && d.Max <= 6 && d.Over2 * 1000 <= d.Total,
                     name + ": seek to " + seconds.ToString("F1") + " s shows packet " + j + " (pts " + pts[j] + ")",
@@ -588,48 +596,131 @@ namespace AlphaClip.Tests
         }
 
         /// <summary>
-        /// Independent reference: planar YUV 4:2:0 -> RGB on the CPU with the same sampling the GPU does (luma point-sampled,
-        /// chroma bilinear with texel centres and the chroma siting shift, clamp to edge). rgba is the read-back RenderTexture, rows bottom first.
+        /// Independent reference: planar YUV 4:2:0 (+ alpha) -> the premultiplied RGBA the shader writes, on the CPU with the same
+        /// sampling the GPU does (luma and alpha point-sampled, chroma bilinear with texel centres, the chroma siting shift and
+        /// the lookup kept inside the picture's own chroma samples). rgba is the read-back RenderTexture (picture size, rows
+        /// bottom first); raw holds coded frames (planar Y, U, V and, for native alpha, A) of info.Width x info.Height.
         /// </summary>
-        private static void CompareFrame(byte[] rgba, byte[] raw, int off, int w, int h, ColorMatrix matrix, bool full, ChromaSiting siting, ref Diff d)
+        private static void CompareFrame(byte[] rgba, byte[] raw, int off, AlphaClipInfo info, ColorMatrix matrix, bool full,
+            ChromaSiting siting, ref Diff d, bool checkAlpha = true)
         {
-            int cw = (w + 1) / 2, ch = (h + 1) / 2;
-            int uOff = off + w * h, vOff = uOff + cw * ch;
-            float lo = full ? 0f : 16f / 255f, ys = full ? 1f : 255f / 219f, cs = full ? 1f : 255f / 224f;
-            float shiftX = siting == ChromaSiting.Left ? 0.25f : 0f;   // in chroma texels, see the shader
-            float rv, gu, gv, bu;
-            if (matrix == ColorMatrix.BT601) { rv = 1.402f; gu = 0.344136f; gv = 0.714136f; bu = 1.772f; }
-            else { rv = 1.5748f; gu = 0.187324f; gv = 0.468124f; bu = 1.8556f; }
-
-            for (int j = 0; j < h; j++)
+            var reference = new Reference(raw, off, info, matrix, full, siting);
+            int pw = info.ContentWidth, ph = info.ContentHeight;
+            for (int j = 0; j < ph; j++)
             {
-                int r = h - 1 - j;   // RenderTexture row j counts from the bottom, the planes from the top
-                float cyf = (r + 0.5f) / h * ch - 0.5f;
+                int r = ph - 1 - j;   // RenderTexture row j counts from the bottom, the planes from the top
+                for (int x = 0; x < pw; x++)
+                {
+                    reference.Pixel(x, r, out int er, out int eg, out int eb, out int ea);
+                    int p = (j * pw + x) * 4;
+                    Tally(ref d, er, rgba[p]);
+                    Tally(ref d, eg, rgba[p + 1]);
+                    Tally(ref d, eb, rgba[p + 2]);
+                    if (checkAlpha)
+                    {
+                        Tally(ref d, ea, rgba[p + 3]);
+                    }
+                }
+            }
+        }
+
+        private static float SrgbToLinear(float c) => c <= 0.04045f ? c / 12.92f : Mathf.Pow((c + 0.055f) / 1.055f, 2.4f);
+        private static float LinearToSrgb(float c) => c <= 0.0031308f ? c * 12.92f : 1.055f * Mathf.Pow(c, 1f / 2.4f) - 0.055f;
+
+        /// <summary>The bytes the YUV shader should write for one picture pixel (see Resources/AlphaClip/YuvToRgb.shader).</summary>
+        private sealed class Reference
+        {
+            private readonly byte[] m_raw;
+            private readonly int m_off, m_w, m_h, m_pw, m_ph, m_cwTex, m_chTex, m_ccw, m_cch, m_uOff, m_vOff, m_aOff;
+            private readonly AlphaClipAlphaMode m_mode;
+            private readonly bool m_premultiplied, m_linear;
+            private readonly float m_lo, m_ys, m_cs, m_shiftX, m_rv, m_gu, m_gv, m_bu;
+
+            public Reference(byte[] raw, int off, AlphaClipInfo info, ColorMatrix matrix, bool full, ChromaSiting siting)
+            {
+                m_raw = raw;
+                m_off = off;
+                m_w = info.Width;
+                m_h = info.Height;
+                m_pw = info.ContentWidth;
+                m_ph = info.ContentHeight;
+                m_cwTex = (m_w + 1) / 2;
+                m_chTex = (m_h + 1) / 2;
+                m_ccw = (m_pw + 1) / 2;   // chroma samples of the picture itself
+                m_cch = (m_ph + 1) / 2;
+                m_uOff = off + m_w * m_h;
+                m_vOff = m_uOff + m_cwTex * m_chTex;
+                m_aOff = m_vOff + m_cwTex * m_chTex;
+                m_mode = info.AlphaMode;
+                m_premultiplied = info.Premultiplied;
+                m_linear = QualitySettings.activeColorSpace == ColorSpace.Linear;
+                m_lo = full ? 0f : 16f / 255f;
+                m_ys = full ? 1f : 255f / 219f;
+                m_cs = full ? 1f : 255f / 224f;
+                m_shiftX = siting == ChromaSiting.Left ? 0.25f : 0f;   // in chroma texels, see the shader
+                if (matrix == ColorMatrix.BT601) { m_rv = 1.402f; m_gu = 0.344136f; m_gv = 0.714136f; m_bu = 1.772f; }
+                else { m_rv = 1.5748f; m_gu = 0.187324f; m_gv = 0.468124f; m_bu = 1.8556f; }
+            }
+
+            /// <summary>x from the left, r from the top of the PICTURE.</summary>
+            public void Pixel(int x, int r, out int outR, out int outG, out int outB, out int outA)
+            {
+                // The chroma lookup position (in chroma texels) is clamped to the picture's own samples, as the shader does.
+                float cyf = Mathf.Clamp((r + 0.5f) / m_h * m_chTex - 0.5f, 0f, m_cch - 1);
                 int cy0 = Mathf.FloorToInt(cyf);
                 float fy = cyf - cy0;
-                int cy1 = Mathf.Clamp(cy0 + 1, 0, ch - 1);
-                cy0 = Mathf.Clamp(cy0, 0, ch - 1);
-                for (int x = 0; x < w; x++)
+                int cy1 = Mathf.Min(cy0 + 1, m_cch - 1);
+                float cxf = Mathf.Clamp((x + 0.5f) / m_w * m_cwTex - 0.5f + m_shiftX, 0f, m_ccw - 1);
+                int cx0 = Mathf.FloorToInt(cxf);
+                float fx = cxf - cx0;
+                int cx1 = Mathf.Min(cx0 + 1, m_ccw - 1);
+
+                float yy = (m_raw[m_off + r * m_w + x] / 255f - m_lo) * m_ys;
+                float u = (Bilinear(m_raw, m_uOff, m_cwTex, cx0, cx1, cy0, cy1, fx, fy) - 128f / 255f) * m_cs;
+                float v = (Bilinear(m_raw, m_vOff, m_cwTex, cx0, cx1, cy0, cy1, fx, fy) - 128f / 255f) * m_cs;
+                float rr = Mathf.Clamp01(yy + m_rv * v), gg = Mathf.Clamp01(yy - m_gu * u - m_gv * v), bb = Mathf.Clamp01(yy + m_bu * u);
+
+                float a = 1f;
+                if (m_mode == AlphaClipAlphaMode.NativeAlpha)
                 {
-                    float cxf = (x + 0.5f) / w * cw - 0.5f + shiftX;
-                    int cx0 = Mathf.FloorToInt(cxf);
-                    float fx = cxf - cx0;
-                    int cx1 = Mathf.Clamp(cx0 + 1, 0, cw - 1);
-                    cx0 = Mathf.Clamp(cx0, 0, cw - 1);
-
-                    float yy = raw[off + r * w + x] / 255f;
-                    float u = Bilinear(raw, uOff, cw, cx0, cx1, cy0, cy1, fx, fy);
-                    float v = Bilinear(raw, vOff, cw, cx0, cx1, cy0, cy1, fx, fy);
-                    yy = (yy - lo) * ys;
-                    u = (u - 128f / 255f) * cs;
-                    v = (v - 128f / 255f) * cs;
-                    float rr = Mathf.Clamp01(yy + rv * v), gg = Mathf.Clamp01(yy - gu * u - gv * v), bb = Mathf.Clamp01(yy + bu * u);
-
-                    int p = (j * w + x) * 4;
-                    Tally(ref d, (int)Math.Round(rr * 255f), rgba[p]);
-                    Tally(ref d, (int)Math.Round(gg * 255f), rgba[p + 1]);
-                    Tally(ref d, (int)Math.Round(bb * 255f), rgba[p + 2]);
+                    a = m_raw[m_aOff + r * m_w + x] / 255f;
                 }
+                else if (m_mode == AlphaClipAlphaMode.PackedRight || m_mode == AlphaClipAlphaMode.PackedBottom)
+                {
+                    int ax = m_mode == AlphaClipAlphaMode.PackedRight ? m_pw : 0, ay = m_mode == AlphaClipAlphaMode.PackedBottom ? m_ph : 0;
+                    a = Mathf.Clamp01((m_raw[m_off + (r + ay) * m_w + (x + ax)] / 255f - m_lo) * m_ys);
+                }
+
+                if (m_mode != AlphaClipAlphaMode.Opaque)
+                {
+                    if (m_linear)
+                    {
+                        // The shader writes linear values; the sRGB render texture encodes them: the bytes are sRGB-encoded.
+                        float inv = 1f / Mathf.Max(a, 1e-4f);
+                        float sr = m_premultiplied ? Mathf.Clamp01(rr * inv) : rr;
+                        float sg = m_premultiplied ? Mathf.Clamp01(gg * inv) : gg;
+                        float sb = m_premultiplied ? Mathf.Clamp01(bb * inv) : bb;
+                        rr = LinearToSrgb(SrgbToLinear(sr) * a);
+                        gg = LinearToSrgb(SrgbToLinear(sg) * a);
+                        bb = LinearToSrgb(SrgbToLinear(sb) * a);
+                    }
+                    else if (m_premultiplied)
+                    {
+                        rr = Mathf.Min(rr, a);
+                        gg = Mathf.Min(gg, a);
+                        bb = Mathf.Min(bb, a);
+                    }
+                    else
+                    {
+                        rr *= a;
+                        gg *= a;
+                        bb *= a;
+                    }
+                }
+                outR = (int)Math.Round(rr * 255f);
+                outG = (int)Math.Round(gg * 255f);
+                outB = (int)Math.Round(bb * 255f);
+                outA = (int)Math.Round(a * 255f);
             }
         }
 

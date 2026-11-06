@@ -9,7 +9,10 @@ using Stopwatch = System.Diagnostics.Stopwatch;   // not `using System.Diagnosti
 
 namespace AlphaClip
 {
-    /// <summary>How the YUV picture maps to RGB. M4 moves this into the sidecar metadata; until then it is a setting.</summary>
+    /// <summary>
+    /// How the YUV picture maps to RGB. A sidecar that names a matrix overrides the component's setting
+    /// (<see cref="AlphaClipPlayer.EffectiveMatrix"/>); without one the setting is used.
+    /// </summary>
     public enum ColorMatrix
     {
         BT601 = 0,
@@ -48,12 +51,39 @@ namespace AlphaClip
         public double UploadDrawMsPerFrame => Frames > 0 ? (UploadUs + DrawUs) / Frames / 1000.0 : 0;
     }
 
+    /// <summary>How a clip stores its transparency (the sidecar's "alpha_mode"; a clip without a sidecar is Opaque, or NativeAlpha when the file has an alpha stream).</summary>
+    public enum AlphaClipAlphaMode
+    {
+        Opaque = 0,
+        /// <summary>The picture on the left, its alpha as a grey image (luma) on the right.</summary>
+        PackedRight = 1,
+        /// <summary>The picture on top, its alpha as a grey image below.</summary>
+        PackedBottom = 2,
+        /// <summary>WebM alpha stream (BlockAdditional): the core returns it as a fourth plane.</summary>
+        NativeAlpha = 3,
+    }
+
     public readonly struct AlphaClipInfo
     {
+        /// <summary>Size of the coded video: the frames the core returns (and the planes uploaded as textures).</summary>
         public readonly int Width, Height;
+        /// <summary>Size of the picture: <see cref="AlphaClipPlayer.Output"/> has this size. Differs from Width/Height only in the packed modes.</summary>
+        public readonly int ContentWidth, ContentHeight;
         public readonly double DurationSeconds;
         public readonly float Fps;
+        /// <summary>True when <see cref="AlphaClipPlayer.Output"/> carries transparency (any mode except Opaque).</summary>
         public readonly bool HasAlpha;
+        /// <summary>True when the core delivers a fourth (alpha) plane with every frame: NativeAlpha only.</summary>
+        public readonly bool HasAlphaPlane;
+        public readonly AlphaClipAlphaMode AlphaMode;
+        /// <summary>The sidecar says the colour in the video is already multiplied by alpha.</summary>
+        public readonly bool Premultiplied;
+        /// <summary>What the sidecar says: 0 = not given (the component's setting applies), 1 = limited, 2 = full.</summary>
+        public readonly int ColorRange;
+        /// <summary>What the sidecar says: 0 = not given (the component's setting applies), 1 = BT.601, 2 = BT.709.</summary>
+        public readonly int Matrix;
+        /// <summary>The sidecar asks for looping (informational; <see cref="AlphaClipPlayer.Loop"/> decides).</summary>
+        public readonly bool LoopHint;
         public readonly long PacketCount;
         public readonly long LoopPeriodUs;
 
@@ -61,9 +91,17 @@ namespace AlphaClip
         {
             Width = i.Width;
             Height = i.Height;
+            ContentWidth = i.ContentW;
+            ContentHeight = i.ContentH;
             DurationSeconds = i.DurationUs / 1e6;
             Fps = i.Fps;
-            HasAlpha = i.HasAlphaPlane != 0;
+            HasAlpha = i.AlphaMode != 0;
+            HasAlphaPlane = i.HasAlphaPlane != 0;
+            AlphaMode = (AlphaClipAlphaMode)i.AlphaMode;
+            Premultiplied = i.Premultiplied != 0;
+            ColorRange = i.ColorRange;
+            Matrix = i.Matrix;
+            LoopHint = i.LoopHint != 0;
             PacketCount = i.PacketCount;
             LoopPeriodUs = i.LoopPeriodUs;
         }
@@ -90,16 +128,22 @@ namespace AlphaClip
     /// Plays a VP9/WebM clip with the AlphaClip core. The core decodes on its own thread; every Unity frame this
     /// component asks it for the newest frame that is due, uploads the Y/U/V planes as R8 textures and converts
     /// them to RGB with a shader into <see cref="Output"/>, an ordinary RenderTexture that any material, RawImage
-    /// or camera can use. M2: opaque video; alpha comes with M4.
+    /// or camera can use. A clip with transparency (native alpha stream, or a picture with its alpha packed beside it,
+    /// described by the clip's sidecar) produces PREMULTIPLIED RGBA: show it with a premultiplied blend
+    /// (Blend One OneMinusSrcAlpha), e.g. the AlphaClip/UnlitPremultiplied and AlphaClip/UIPremultiplied shaders
+    /// (see <see cref="AlphaClipMaterials"/>), not with a straight-alpha shader.
     /// </summary>
     [DisallowMultipleComponent]
     public sealed class AlphaClipPlayer : MonoBehaviour
     {
         [Header("Source")]
-        [Tooltip("WebM file under StreamingAssets (editor and standalone). Ignored when Clip Asset is set.")]
+        [Tooltip("WebM file under StreamingAssets (editor and standalone). Ignored when Clip Asset is set. " +
+                 "A sidecar with the same name and the extension .acmeta.json next to it is picked up automatically.")]
         [SerializeField] private string streamingAssetsPath = "";
         [Tooltip("A TextAsset holding the WebM bytes (rename the file to .bytes). Works in asset bundles.")]
         [SerializeField] private TextAsset clipAsset;
+        [Tooltip("The sidecar (clip.acmeta.json) for Clip Asset, as a TextAsset. Leave empty for a clip without a sidecar.")]
+        [SerializeField] private TextAsset metaAsset;
 
         [Header("Playback")]
         [SerializeField] private bool playOnEnable = true;
@@ -107,7 +151,7 @@ namespace AlphaClip
         [Tooltip("Decoded frames the core may keep ready (1..64).")]
         [SerializeField, Range(1, 64)] private int queueDepth = 4;
 
-        [Header("Colour (moves into the sidecar in M4)")]
+        [Header("Colour (used when the sidecar does not say; a sidecar's matrix and range win)")]
         [SerializeField] private ColorMatrix matrix = ColorMatrix.BT709;
         [Tooltip("Off: limited (TV) range 16-235, the usual case for video.")]
         [SerializeField] private bool fullRange = false;
@@ -116,6 +160,11 @@ namespace AlphaClip
 
         private static readonly int UTexId = Shader.PropertyToID("_UTex");
         private static readonly int VTexId = Shader.PropertyToID("_VTex");
+        private static readonly int ATexId = Shader.PropertyToID("_ATex");
+        private static readonly int AlphaModeId = Shader.PropertyToID("_AlphaMode");
+        private static readonly int PremultipliedId = Shader.PropertyToID("_Premultiplied");
+        private static readonly int ContentRectId = Shader.PropertyToID("_ContentRect");
+        private static readonly int ChromaClampId = Shader.PropertyToID("_ChromaClamp");
         private static readonly int YuvRangeId = Shader.PropertyToID("_YuvRange");
         private static readonly int YuvCoeffId = Shader.PropertyToID("_YuvCoeff");
         private static readonly int ChromaShiftId = Shader.PropertyToID("_ChromaShift");
@@ -124,7 +173,8 @@ namespace AlphaClip
         private IntPtr m_player;
         private IntPtr m_nativeData;   // the core does not copy the bytes of ac_open_memory: we own them until ac_close
         private AcInfo m_info;
-        private Texture2D m_y, m_u, m_v;
+        private Texture2D m_y, m_u, m_v, m_a;   // m_a: the alpha plane, native_alpha clips only
+        private Vector4 m_contentRect, m_chromaClamp;
         private RenderTexture m_output;
         private Material m_material;
         private bool m_playing;
@@ -173,8 +223,16 @@ namespace AlphaClip
             }
         }
 
+        /// <summary>The sidecar (clip.acmeta.json) that goes with <see cref="ClipAsset"/>; used by <see cref="Open(TextAsset, string)"/> and <see cref="Open(byte[], string)"/> when no sidecar text is passed.</summary>
+        public TextAsset MetaAsset { get => metaAsset; set => metaAsset = value; }
+
         public ColorMatrix Matrix { get => matrix; set => matrix = value; }
         public bool FullRange { get => fullRange; set => fullRange = value; }
+
+        /// <summary>The matrix the shader uses: the sidecar's when it names one, otherwise <see cref="Matrix"/>.</summary>
+        public ColorMatrix EffectiveMatrix => m_info.Matrix == 2 ? ColorMatrix.BT709 : m_info.Matrix == 1 ? ColorMatrix.BT601 : matrix;
+        /// <summary>The range the shader uses: the sidecar's when it names one, otherwise <see cref="FullRange"/>.</summary>
+        public bool EffectiveFullRange => m_info.ColorRange == 2 || (m_info.ColorRange != 1 && fullRange);
         public ChromaSiting ChromaSiting { get => chromaSiting; set => chromaSiting = value; }
         public int QueueDepth { get => queueDepth; set => queueDepth = Mathf.Clamp(value, 1, 64); }
 
@@ -194,12 +252,26 @@ namespace AlphaClip
         public static int NativeOpenCount => AcNative.OpenedCount;
         public static int NativeCloseCount => AcNative.ClosedCount;
 
-        public void OpenFile(string path)
+        /// <summary>File extension of the sidecar that describes a clip: <c>clip.webm</c> goes with <c>clip.acmeta.json</c>.</summary>
+        public const string SidecarExtension = ".acmeta.json";
+
+        /// <summary>
+        /// Opens a WebM file. <paramref name="metaJson"/> is the sidecar text; null looks for <c>&lt;path without extension&gt;.acmeta.json</c>
+        /// next to the file and uses it when it exists; "" forces "no sidecar". Without a sidecar the clip plays as a plain
+        /// picture, or with its alpha stream when the file has one (see the core's "auto" mode).
+        /// Throws <see cref="AlphaClipException"/> (a malformed or unsupported sidecar is ErrFormat / ErrUnsupported).
+        /// </summary>
+        public void OpenFile(string path, string metaJson = null)
         {
             Close();
             try
             {
-                Initialize(AcNative.OpenFile(path));
+                if (metaJson == null)
+                {
+                    string sidecar = Path.ChangeExtension(path, SidecarExtension);
+                    metaJson = File.Exists(sidecar) ? File.ReadAllText(sidecar, System.Text.Encoding.UTF8) : null;
+                }
+                Initialize(AcNative.OpenFile(path, metaJson));
             }
             catch
             {
@@ -208,7 +280,8 @@ namespace AlphaClip
             }
         }
 
-        public void Open(byte[] webm)
+        /// <summary>Opens WebM bytes. <paramref name="metaJson"/> is the sidecar text; null uses <see cref="MetaAsset"/> if one is set, "" forces none.</summary>
+        public void Open(byte[] webm, string metaJson = null)
         {
             if (webm == null || webm.Length == 0)
             {
@@ -217,9 +290,10 @@ namespace AlphaClip
             Close();
             try
             {
+                metaJson ??= metaAsset != null ? metaAsset.text : null;
                 m_nativeData = Marshal.AllocHGlobal(webm.Length);
                 Marshal.Copy(webm, 0, m_nativeData, webm.Length);
-                Initialize(AcNative.OpenMemory(m_nativeData, webm.Length));
+                Initialize(AcNative.OpenMemory(m_nativeData, webm.Length, metaJson));
             }
             catch
             {
@@ -228,9 +302,9 @@ namespace AlphaClip
             }
         }
 
-        public void Open(TextAsset asset)
+        public void Open(TextAsset asset, string metaJson = null)
         {
-            Open(asset.bytes);
+            Open(asset.bytes, metaJson);
         }
 
         /// <summary>True while <see cref="OpenUriAsync"/> is still reading the clip.</summary>
@@ -247,7 +321,7 @@ namespace AlphaClip
         /// The whole file is read into memory first (the core reads from memory anyway), so memory briefly holds two
         /// copies; <see cref="Open(byte[])"/> keeps one native copy for the life of the clip.
         /// </summary>
-        public IEnumerator OpenUriAsync(string uri)
+        public IEnumerator OpenUriAsync(string uri, string metaJson = null)
         {
             LoadError = null;
             m_loading = true;
@@ -264,12 +338,24 @@ namespace AlphaClip
                     LoadError = "cannot read " + uri + ": " + request.error;
                 }
             }
+            if (data != null && metaJson == null)
+            {
+                // The sidecar next to the clip. A clip without one is fine: any failure to read it means "no sidecar".
+                using (UnityWebRequest request = UnityWebRequest.Get(SidecarUri(uri)))
+                {
+                    yield return request.SendWebRequest();
+                    if (request.result == UnityWebRequest.Result.Success)
+                    {
+                        metaJson = request.downloadHandler.text;
+                    }
+                }
+            }
             m_loading = false;
             if (data != null)
             {
                 try
                 {
-                    Open(data);
+                    Open(data, metaJson);
                 }
                 catch (Exception e)
                 {
@@ -294,6 +380,21 @@ namespace AlphaClip
         private static string ResolveStreamingAssets(string relativePath)
         {
             return relativePath.Contains("://") ? relativePath : Path.Combine(Application.streamingAssetsPath, relativePath);
+        }
+
+        /// <summary>The URI of the sidecar that belongs to a clip URI: the extension of the last path segment becomes .acmeta.json (a query string or fragment stays).</summary>
+        public static string SidecarUri(string uri)
+        {
+            int tail = uri.IndexOfAny(new[] { '?', '#' });
+            string path = tail < 0 ? uri : uri.Substring(0, tail);
+            string rest = tail < 0 ? "" : uri.Substring(tail);
+            int slash = Mathf.Max(path.LastIndexOf('/'), path.LastIndexOf('\\'));
+            int dot = path.LastIndexOf('.');
+            if (dot > slash)
+            {
+                path = path.Substring(0, dot);
+            }
+            return path + SidecarExtension + rest;
         }
 
         public void Play()
@@ -417,7 +518,9 @@ namespace AlphaClip
             SafeDestroy(ref m_y);
             SafeDestroy(ref m_u);
             SafeDestroy(ref m_v);
+            SafeDestroy(ref m_a);
             SafeDestroy(ref m_material);
+            m_info = default;   // the sidecar's matrix / range no longer apply
             if (m_output != null)
             {
                 m_output.Release();
@@ -517,6 +620,17 @@ namespace AlphaClip
             m_y = NewPlane(w, h, FilterMode.Point, "AlphaClip Y");
             m_u = NewPlane(cw, ch, FilterMode.Bilinear, "AlphaClip U");
             m_v = NewPlane(cw, ch, FilterMode.Bilinear, "AlphaClip V");
+            if (m_info.HasAlphaPlane != 0)
+            {
+                m_a = NewPlane(w, h, FilterMode.Point, "AlphaClip A");
+            }
+
+            // Where the picture (and, in the packed modes, its alpha image) lies in the coded frame, in texture coordinates,
+            // and how far the chroma lookup may go: never into the chroma samples of the neighbouring alpha image.
+            int pw = m_info.ContentW, ph = m_info.ContentH;
+            m_contentRect = new Vector4((float)pw / w, (float)ph / h, (float)m_info.AlphaX / w, (float)m_info.AlphaY / h);
+            int pcw = (pw + 1) / 2, pch = (ph + 1) / 2;
+            m_chromaClamp = new Vector4(0.5f / cw, 0.5f / ch, (pcw - 0.5f) / cw, (pch - 0.5f) / ch);
 
             Shader shader = Resources.Load<Shader>("AlphaClip/YuvToRgb");
             if (shader == null)
@@ -526,7 +640,8 @@ namespace AlphaClip
             m_material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave, name = "AlphaClip YuvToRgb" };
 
             // Default read/write: an sRGB target in a Linear colour-space project (the shader then outputs linear values).
-            m_output = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default)
+            // The size is the picture's, not the coded frame's (they differ in the packed modes).
+            m_output = new RenderTexture(pw, ph, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default)
             {
                 name = "AlphaClip Output",
                 hideFlags = HideFlags.HideAndDontSave,
@@ -567,19 +682,37 @@ namespace AlphaClip
             m_u.Apply(false, false);
             m_v.LoadRawTextureData(f.Plane2, cw * ch);
             m_v.Apply(false, false);
+            if (m_a != null)
+            {
+                if (f.Plane3 == IntPtr.Zero || f.Stride3 != w)
+                {
+                    throw new AlphaClipException(AcStatus.ErrState, "AlphaClip: the core delivered no alpha plane for a native_alpha clip");
+                }
+                m_a.LoadRawTextureData(f.Plane3, w * h);
+                m_a.Apply(false, false);
+            }
         }
 
         private void Draw()
         {
-            float offset = fullRange ? 0f : 16f / 255f;
-            float lumaScale = fullRange ? 1f : 255f / 219f;
-            float chromaScale = fullRange ? 1f : 255f / 224f;
-            Vector4 coeff = matrix == ColorMatrix.BT601
+            bool full = EffectiveFullRange;
+            float offset = full ? 0f : 16f / 255f;
+            float lumaScale = full ? 1f : 255f / 219f;
+            float chromaScale = full ? 1f : 255f / 224f;
+            Vector4 coeff = EffectiveMatrix == ColorMatrix.BT601
                 ? new Vector4(1.402f, 0.344136f, 0.714136f, 1.772f)
                 : new Vector4(1.5748f, 0.187324f, 0.468124f, 1.8556f);
 
             m_material.SetTexture(UTexId, m_u);
             m_material.SetTexture(VTexId, m_v);
+            if (m_a != null)
+            {
+                m_material.SetTexture(ATexId, m_a);
+            }
+            m_material.SetFloat(AlphaModeId, m_info.AlphaMode);
+            m_material.SetFloat(PremultipliedId, m_info.Premultiplied);
+            m_material.SetVector(ContentRectId, m_contentRect);
+            m_material.SetVector(ChromaClampId, m_chromaClamp);
             m_material.SetVector(YuvRangeId, new Vector4(offset, lumaScale, chromaScale, 0f));
             m_material.SetVector(YuvCoeffId, coeff);
             m_material.SetVector(ChromaShiftId, new Vector4(chromaSiting == ChromaSiting.Left ? 0.25f : 0f, 0f, 0f, 0f));

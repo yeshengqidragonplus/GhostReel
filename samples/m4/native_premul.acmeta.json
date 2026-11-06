@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "alpha_mode": "native_alpha",
+  "premultiplied": true,
+  "color_range": "limited",
+  "matrix": "bt601",
+  "content_size": [320, 180],
+  "loop_hint": true
+}

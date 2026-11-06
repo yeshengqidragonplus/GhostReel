@@ -92,7 +92,7 @@ Unity 6 + URP 17 需要下载五个小包(共 3.75 MB,你同意之后下的,只�
 > Android 共享库和 Unity 的 Android 插件设置——**完成**(m3-notes 第 2、3 条);StreamingAssets 经 UnityWebRequest 读取——**完成**,真机上实际走过;
 > 性能基线——**有第一份**(应用内、未固定核、640×360,见 m3-conclusion 的数字),平面拷贝和 RenderTexture 这一遍在这个规格下不需要改,1080p 没量;
 > Unity 6 ——**仍未决定**,Android 上没验证(Android 模块没装);起始处时钟——Pixel 6a 上首张画面 33–35 ms,**不需要**"等第一帧再起算",片子更大时再看;
-> Unity 6 工程里 URP 17 依赖包的管理方式——**仍未处理**;HDRP、alpha、着色器生成脚本——不变。
+> Unity 6 工程里 URP 17 依赖包的管理方式——**仍未处理**;HDRP、着色器生成脚本——不变;alpha——M4 已做(见 m4-conclusion)。
 
 ## 产物
 

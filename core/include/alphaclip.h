@@ -5,9 +5,10 @@
  * Every function returns an ac_status; no exception ever crosses this boundary,
  * and malformed input must produce an error, never a crash.
  *
- * M1 status: open / info / seek / synchronous decode / threaded player are
- * implemented; looping arrives with M1.4. See docs/m1-notes.md and the design
- * document, section 7.
+ * Status: open / info / seek / synchronous decode / threaded player / loop (M1),
+ * sidecar metadata with the opaque, packed_right, packed_bottom and native_alpha
+ * modes (M4). See docs/m1-notes.md, docs/m4-notes.md and the design document,
+ * sections 6 and 7.
  */
 #ifndef ALPHACLIP_H
 #define ALPHACLIP_H
@@ -45,14 +46,40 @@ typedef enum ac_status {
   AC_END = 9              /* end of stream: no more frames */
 } ac_status;
 
+/* How transparency is stored. Numeric values are part of the ABI (4 is reserved for "keyed", which is rejected). */
+typedef enum ac_alpha_mode {
+  AC_ALPHA_OPAQUE = 0,         /* no transparency */
+  AC_ALPHA_PACKED_RIGHT = 1,   /* the picture is on the left, its alpha as a grey image on the right */
+  AC_ALPHA_PACKED_BOTTOM = 2,  /* the picture is on top, its alpha as a grey image below */
+  AC_ALPHA_NATIVE = 3          /* WebM BlockAdditional alpha: frames carry plane[3] */
+} ac_alpha_mode;
+
+/* ac_info.color_range / ac_info.matrix: what the sidecar says; UNSPECIFIED = the binding's own default applies. */
+enum {
+  AC_RANGE_UNSPECIFIED = 0,
+  AC_RANGE_LIMITED = 1,
+  AC_RANGE_FULL = 2,
+  AC_MATRIX_UNSPECIFIED = 0,
+  AC_MATRIX_BT601 = 1,
+  AC_MATRIX_BT709 = 2
+};
+
 typedef struct ac_info {
-  int32_t width, height;         /* coded video size */
-  int32_t content_w, content_h;  /* visible picture size (== width/height until packed modes exist) */
+  int32_t width, height;         /* coded video size = size of the frames ac_decode_next / ac_acquire_frame return */
+  int32_t content_w, content_h;  /* visible picture size: == width/height except in the packed modes */
   int64_t duration_us;
   float fps;                     /* 0 when it cannot be determined */
-  int32_t has_alpha_plane;       /* 1 when frames carry a 4th (A) plane */
+  int32_t has_alpha_plane;       /* 1 when frames carry a 4th (A) plane (alpha_mode == AC_ALPHA_NATIVE) */
   int64_t packet_count;          /* video packets in the file (hidden frames produce no output) */
   int64_t loop_period_us;        /* pts added per loop pass: (last pts - first pts) + one frame */
+  int32_t alpha_mode;            /* ac_alpha_mode */
+  int32_t premultiplied;         /* 1: the colour in the video is already multiplied by alpha (sidecar "premultiplied") */
+  int32_t color_range;           /* AC_RANGE_* */
+  int32_t matrix;                /* AC_MATRIX_* */
+  int32_t loop_hint;             /* 1: the sidecar asks for looping (informational) */
+  int32_t alpha_x, alpha_y;      /* packed modes: top-left corner of the alpha image inside the coded frame (its size is
+                                    content_w x content_h; the alpha value is the Y plane there); 0 otherwise */
+  int32_t reserved;              /* 0 */
 } ac_info;
 
 typedef struct ac_frame {
@@ -63,13 +90,20 @@ typedef struct ac_frame {
   uint32_t flags;                /* reserved, 0 */
 } ac_frame;
 
-/* Version string of the core, e.g. "0.1.0-m1". Never NULL. */
+/* Version string of the core, e.g. "0.1.0-m4". Never NULL. */
 AC_API const char* ac_version(void);
 
 /*
  * Opens a WebM clip. `data` is NOT copied: it must stay valid until ac_close.
- * `meta_json` is the sidecar metadata; sidecars are not supported yet, so pass
- * NULL (a non-empty string returns AC_ERR_UNSUPPORTED).
+ * `meta_json` is the sidecar metadata (clip.acmeta.json, UTF-8, at most 64 KiB), or NULL / "" for none.
+ * Without a sidecar the clip is "auto": native_alpha when the file carries an alpha stream, otherwise
+ * opaque; colour range and matrix stay UNSPECIFIED. With one the sidecar is authoritative:
+ *   AC_ERR_FORMAT       the JSON is malformed, a value has the wrong type or is out of range, or the metadata
+ *                       contradicts the file (native_alpha without an alpha stream, a packed layout that does not fit)
+ *   AC_ERR_UNSUPPORTED  a well-formed sidecar this core cannot honour: schema other than 1, alpha_mode "keyed",
+ *                       non-zero edge post-processing values
+ * Unknown extra keys are ignored. opaque never decodes the alpha stream, even if the file has one; packed_*
+ * with an alpha stream in the file is rejected as contradictory. See docs/m4-notes.md for the schema.
  */
 AC_API ac_status ac_open_memory(const uint8_t* data, size_t len, const char* meta_json,
                                 ac_player** out);

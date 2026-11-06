@@ -42,7 +42,7 @@ void FrameBuffer::Allocate(int w, int h, bool alpha) {
   plane[3].resize(alpha ? static_cast<size_t>(w) * static_cast<size_t>(h) : 0);
 }
 
-std::unique_ptr<Clip> Clip::Open(const uint8_t* data, size_t size) {
+std::unique_ptr<Clip> Clip::Open(const uint8_t* data, size_t size, bool ignore_alpha) {
   std::unique_ptr<Clip> clip(new Clip());
   clip->data_ = data;
   clip->index_ = ParseWebm(data, size);
@@ -70,12 +70,13 @@ std::unique_ptr<Clip> Clip::Open(const uint8_t* data, size_t size) {
     }
     if (!p.alpha.empty()) ++with_alpha;
   }
-  if (idx.alpha_mode_flag && with_alpha != 0 && with_alpha != idx.packets.size()) {
+  const bool stream_has_alpha = idx.alpha_mode_flag && with_alpha != 0;
+  if (!ignore_alpha && stream_has_alpha && with_alpha != idx.packets.size()) {
     throw Failure(AC_ERR_FORMAT, "only " + std::to_string(with_alpha) + " of " +
                                      std::to_string(idx.packets.size()) +
                                      " packets carry alpha data");
   }
-  const bool has_alpha = idx.alpha_mode_flag && with_alpha != 0;
+  const bool has_alpha = stream_has_alpha && !ignore_alpha;
 
   // Keyframes: a seek may only start where BOTH streams have a keyframe. The size is
   // checked on every keyframe so that a corrupt header cannot make libvpx allocate a
@@ -115,6 +116,7 @@ std::unique_ptr<Clip> Clip::Open(const uint8_t* data, size_t size) {
   info.width = idx.width;
   info.height = idx.height;
   info.has_alpha = has_alpha;
+  info.stream_has_alpha = stream_has_alpha;
   info.packet_count = n;
   const int64_t first = idx.packets.front().pts_us;
   const int64_t last = idx.packets.back().pts_us;

@@ -6,6 +6,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.Profiling;
 using UnityEngine.Rendering;
+using UnityEngine.UI;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -61,7 +62,7 @@ namespace AlphaClip.Tests
         {
             m_clip = Arg("-acClip");
             int code = 0;
-            var watchdog = StartCoroutine(Watchdog(150f));
+            var watchdog = StartCoroutine(Watchdog(300f));
             IEnumerator run = Array.IndexOf(Environment.GetCommandLineArgs(), "-acDemoCheck") >= 0 ? RunDemo() : RunAll();
             while (true)
             {
@@ -347,6 +348,234 @@ namespace AlphaClip.Tests
             Check(produced, "picture samples for the device comparison were produced for t = 0, 0.5, 1.0 s");
             Destroy(p9.gameObject);
             yield return null;
+
+            // 7. M4: sidecars through UnityWebRequest, then transparent clips through a UGUI RawImage (only with -acAlphaClips / -acTruth)
+            yield return UriSidecarTests();
+            yield return UiCompositeTests();
+        }
+
+        /// <summary>
+        /// The sidecar travels with the clip when it is read through UnityWebRequest (this is the Android StreamingAssets path; a file:// URI
+        /// exercises the same code): the clip native_premul.webm says "premultiplied", which "auto" mode would not know.
+        /// </summary>
+        private IEnumerator UriSidecarTests()
+        {
+            string clipsArg = Arg("-acAlphaClips");
+            string premul = string.IsNullOrEmpty(clipsArg) ? null : Array.Find(clipsArg.Split(';'), c => Path.GetFileName(c).Contains("native_premul"));
+            if (premul == null)
+            {
+                yield break;
+            }
+            string uri = new Uri(Path.GetFullPath(premul)).AbsoluteUri;
+            int opened0 = AlphaClipPlayer.NativeOpenCount, closed0 = AlphaClipPlayer.NativeCloseCount;
+
+            var go = new GameObject("alphaclip-uri-sidecar");
+            AlphaClipPlayer p = go.AddComponent<AlphaClipPlayer>();
+            IEnumerator load = p.OpenUriAsync(uri);
+            while (load.MoveNext())
+            {
+                yield return load.Current;
+            }
+            AlphaClipInfo info = p.Info;
+            Check(p.IsOpen && p.LoadError == null && info.AlphaMode == AlphaClipAlphaMode.NativeAlpha && info.Premultiplied &&
+                  info.ContentWidth == AlphaClipTruth.Width && info.Matrix == 1 && info.ColorRange == 1,
+                "OpenUriAsync(file://) finds the sidecar next to the clip (" + info.AlphaMode + ", premultiplied " + info.Premultiplied + ", error " + p.LoadError + ")");
+            Destroy(go);
+            yield return null;
+
+            go = new GameObject("alphaclip-uri-sidecar");
+            p = go.AddComponent<AlphaClipPlayer>();
+            load = p.OpenUriAsync(uri, "{\"schema\":1,\"alpha_mode\":\"opaque\"}");
+            while (load.MoveNext())
+            {
+                yield return load.Current;
+            }
+            Check(p.IsOpen && p.Info.AlphaMode == AlphaClipAlphaMode.Opaque && !p.Info.Premultiplied,
+                "OpenUriAsync with an explicit sidecar text uses that text, not the file next to the clip");
+            Destroy(go);
+            yield return null;
+
+            go = new GameObject("alphaclip-uri-sidecar");
+            p = go.AddComponent<AlphaClipPlayer>();
+            load = p.OpenUriAsync(uri, "{\"schema\":1,");   // logs an error on purpose
+            while (load.MoveNext())
+            {
+                yield return load.Current;
+            }
+            Check(!p.IsOpen && !p.IsLoading && p.LoadError != null && p.LoadError.Contains("sidecar"),
+                "a bad sidecar given to OpenUriAsync is reported through LoadError, not thrown (" + p.LoadError + ")");
+            Destroy(go);
+            yield return null;
+
+            AlphaClipPlayer p4 = NewPlayer(true, 4, uri);   // PlayOnEnable with a URI source
+            float t0 = Time.realtimeSinceStartup;
+            while (p4.FramesPresented < 3 && Time.realtimeSinceStartup - t0 < 5f)
+            {
+                yield return null;
+            }
+            Check(p4.IsPlaying && p4.FramesPresented >= 3 && p4.Info.Premultiplied && p4.Info.AlphaMode == AlphaClipAlphaMode.NativeAlpha,
+                "PlayOnEnable with a URI source picks up the sidecar and plays (" + p4.FramesPresented + " pictures)");
+            Destroy(p4.gameObject);
+            yield return null;
+            yield return new WaitForSeconds(0.2f);
+            int opened = AlphaClipPlayer.NativeOpenCount - opened0, closed = AlphaClipPlayer.NativeCloseCount - closed0;
+            Check(opened == 3 && closed == opened, "sidecar loading through UnityWebRequest: every native player that was opened was closed (" + opened + " opened, " + closed + " closed)");
+        }
+
+        /// <summary>
+        /// Transparent clips on the UI path: each clip is shown by a RawImage with the premultiplied UI shader (AlphaClipMaterials.CreateUI)
+        /// in a world-space canvas, drawn by a camera over solid backgrounds, and compared with the exact truth like the camera + quad
+        /// test of the edit-mode suite. Controls: the default UI material (straight-alpha blend) must show a dark rim; a RectMask2D over the
+        /// left half must clip the premultiplied picture cleanly (the right half stays the plain background).
+        /// </summary>
+        private IEnumerator UiCompositeTests()
+        {
+            string clipsArg = Arg("-acAlphaClips"), truthPath = Arg("-acTruth");
+            if (string.IsNullOrEmpty(clipsArg) || string.IsNullOrEmpty(truthPath))
+            {
+                yield break;
+            }
+            byte[] truth = File.ReadAllBytes(truthPath);
+            int w = AlphaClipTruth.Width, h = AlphaClipTruth.Height;
+            var backgrounds = new[] { new Color32(255, 255, 255, 255), new Color32(128, 128, 128, 255), new Color32(0, 200, 230, 255) };
+            string space = QualitySettings.activeColorSpace + ", " + ActivePipeline();
+
+            Material uiMaterial = AlphaClipMaterials.CreateUI();
+            var camGo = new GameObject("alphaclip-ui-camera");
+            var cam = camGo.AddComponent<Camera>();
+            cam.orthographic = true;
+            cam.orthographicSize = 0.5f;
+            cam.nearClipPlane = 0.1f;
+            cam.farClipPlane = 10f;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.enabled = false;
+            camGo.transform.position = new Vector3(1000f, 0f, -1f);   // away from anything else in the scene
+
+            // A world-space canvas of w x h pixels, 1 unit high, so that one canvas pixel is one pixel of the camera's target.
+            var canvasGo = new GameObject("alphaclip-ui-canvas", typeof(RectTransform));
+            var canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvas.worldCamera = cam;
+            var canvasRect = canvasGo.GetComponent<RectTransform>();
+            canvasRect.sizeDelta = new Vector2(w, h);
+            canvasRect.localScale = Vector3.one / h;
+            canvasRect.position = new Vector3(1000f, 0f, 0f);
+
+            var maskGo = new GameObject("mask", typeof(RectTransform));
+            maskGo.transform.SetParent(canvasGo.transform, false);
+            var maskRect = maskGo.GetComponent<RectTransform>();
+            maskRect.anchorMin = Vector2.zero;
+            maskRect.anchorMax = Vector2.one;
+            maskRect.offsetMin = maskRect.offsetMax = Vector2.zero;
+
+            // The picture keeps its full width however narrow the mask is: pinned to the mask's left edge, w pixels wide.
+            var rawGo = new GameObject("raw", typeof(RectTransform));
+            rawGo.transform.SetParent(maskGo.transform, false);
+            var raw = rawGo.AddComponent<RawImage>();
+            raw.raycastTarget = false;
+            var rawRect = rawGo.GetComponent<RectTransform>();
+            rawRect.anchorMin = Vector2.zero;
+            rawRect.anchorMax = new Vector2(0f, 1f);
+            rawRect.pivot = new Vector2(0f, 0.5f);
+            rawRect.sizeDelta = new Vector2(w, 0f);
+            rawRect.anchoredPosition = Vector2.zero;
+
+            var target = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+            cam.targetTexture = target;
+
+            bool maskTested = false;
+            try
+            {
+                foreach (string clip in clipsArg.Split(';'))
+                {
+                    string name = Path.GetFileName(clip);
+                    AlphaClipPlayer p = NewPlayer(false, 64, clip);
+                    p.Pause();
+                    Check(p.IsOpen && p.Info.HasAlpha && p.Output != null && p.Output.width == w && p.Output.height == h,
+                        name + " (UI): opened as a transparent clip with a " + w + "x" + h + " picture");
+                    raw.texture = p.Output;
+
+                    raw.material = uiMaterial;
+                    for (int b = 0; b < backgrounds.Length; b++)
+                    {
+                        CompositeStats all = default;
+                        for (int f = 0; f < AlphaClipTruth.Frames.Length; f++)
+                        {
+                            Check(AlphaClipTruth.ShowFrame(p, AlphaClipTruth.Frames[f]), name + " (UI): frame " + AlphaClipTruth.Frames[f] + " is shown after a seek");
+                            yield return null;
+                            all.Add(AlphaClipTruth.Measure(RenderUi(cam, target, backgrounds[b]), truth, f, backgrounds[b]));
+                        }
+                        m_report.AppendLine("INFO  " + name + " (UI) over (" + backgrounds[b].r + "," + backgrounds[b].g + "," + backgrounds[b].b + ") [" + space +
+                                            "]: mean |error| " + all.MeanAbs.ToString("F3") + ", max " + all.Max + ", soft-edge signed mean " + all.EdgeMean.ToString("F3"));
+                        Check(all.EdgeCount > 100 && all.MeanAbs <= AlphaClipTruth.MaxMeanAbs && Math.Abs(all.EdgeMean) <= AlphaClipTruth.MaxEdgeMean,
+                            name + " (UI) over (" + backgrounds[b].r + "," + backgrounds[b].g + "," + backgrounds[b].b + "): RawImage + AlphaClip/UIPremultiplied matches the truth, no rim (mean |error| " +
+                            all.MeanAbs.ToString("F2") + ", soft-edge signed mean " + all.EdgeMean.ToString("F2") + ")");
+                    }
+
+                    // control: Unity's default UI material blends straight alpha, so premultiplied colour is multiplied twice: a dark rim
+                    raw.material = null;
+                    CompositeStats control = default;
+                    for (int f = 0; f < AlphaClipTruth.Frames.Length; f++)
+                    {
+                        AlphaClipTruth.ShowFrame(p, AlphaClipTruth.Frames[f]);
+                        yield return null;
+                        control.Add(AlphaClipTruth.Measure(RenderUi(cam, target, backgrounds[0]), truth, f, backgrounds[0]));
+                    }
+                    m_report.AppendLine("INFO  " + name + " (UI) CONTROL default UI material over white: soft-edge signed mean " + control.EdgeMean.ToString("F2"));
+                    Check(control.EdgeMean < -AlphaClipTruth.MinControlEdgeMean,
+                        name + " (UI): control, the default UI material gives a dark rim (soft-edge signed mean " + control.EdgeMean.ToString("F1") + " < -" + AlphaClipTruth.MinControlEdgeMean + ")");
+
+                    if (!maskTested)
+                    {
+                        maskTested = true;
+                        raw.material = uiMaterial;
+                        var rectMask = maskGo.AddComponent<RectMask2D>();
+                        maskRect.anchorMax = new Vector2(0.5f, 1f);
+                        Color32 bg = backgrounds[2];
+                        AlphaClipTruth.ShowFrame(p, AlphaClipTruth.Frames[1]);
+                        yield return null;
+                        byte[] rgba = RenderUi(cam, target, bg);
+                        int outside = 0;
+                        for (int j = 0; j < h; j++)
+                        {
+                            for (int x = w / 2 + 2; x < w; x++)
+                            {
+                                int p0 = (j * w + x) * 4;
+                                if (Math.Abs(rgba[p0] - bg.r) > 1 || Math.Abs(rgba[p0 + 1] - bg.g) > 1 || Math.Abs(rgba[p0 + 2] - bg.b) > 1)
+                                {
+                                    outside++;
+                                }
+                            }
+                        }
+                        CompositeStats inside = AlphaClipTruth.Measure(rgba, truth, 1, bg, 0, w / 2 - 2);
+                        Check(outside == 0, name + " (UI): RectMask2D over the left half leaves the right half as the plain background (" + outside + " pixels differ)");
+                        Check(inside.Count > 0 && inside.MeanAbs <= AlphaClipTruth.MaxMeanAbs,
+                            name + " (UI): RectMask2D keeps the left half equal to the truth (mean |error| " + inside.MeanAbs.ToString("F3") + ")");
+                        Destroy(rectMask);
+                        maskRect.anchorMax = Vector2.one;
+                        yield return null;
+                    }
+                    Destroy(p.gameObject);
+                    yield return null;
+                }
+            }
+            finally
+            {
+                cam.targetTexture = null;
+                target.Release();
+                Destroy(target);
+                Destroy(uiMaterial);
+                Destroy(canvasGo);
+                Destroy(camGo);
+            }
+        }
+
+        private static byte[] RenderUi(Camera cam, RenderTexture target, Color32 background)
+        {
+            cam.backgroundColor = background;
+            Canvas.ForceUpdateCanvases();
+            cam.Render();
+            return AlphaClipTruth.ReadBack(target);
         }
 
         /// <summary>Plays the demo scene (opened by DemoScene.PlayDemoBatch) for a moment and checks what is on screen.</summary>
