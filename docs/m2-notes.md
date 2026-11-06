@@ -44,8 +44,10 @@ bindings/unity/scripts/                 sync_plugin_win64.sh、run_editmode_test
    C# 侧运行时再校验。
 6. **打开方式:** `OpenFile(path)`(编辑器和独立播放器)、`Open(byte[])`(拷进原生内存,核心不拷贝所以组件持有它直到 `ac_close` 之后才释放)、
    `Open(TextAsset)`(`.bytes` 资源,资源包里的原始数据就是这么走的)。Android 的 StreamingAssets 在 APK 里,要用 UnityWebRequest 读字节再 `Open(byte[])`——留给 M3。
+   *(M3 更新:已做,`OpenUriAsync` / `OpenStreamingAssetsAsync`,来源含 `://` 时自动走这条路,见 [m3-notes.md](m3-notes.md) 第 4 条。)*
 7. **生命周期:** `OnDestroy` → `Close()`:先 `ac_close`(会 join 解码线程),再释放字节拷贝,再销毁贴图、材质、渲染纹理。`OnDisable` 不做事:Update 不再被调用,
    核心的队列满了解码线程就会停下,CPU 占用接近零,所以没有单独做"后台暂停"(设计 §9.4 里要求的"应用进后台时暂停解码"留给真机阶段确认)。
+   *(M3 更新:`OnDisable` 现在会清掉"加载中"标记(UnityWebRequest 加载期间被禁用的情况);后台暂停在 M3 里仍没有在设备上验证。)*
 8. **时钟:** `Time.unscaledTimeAsDouble`。批处理模式的播放模式里,Unity 自己的两种时间不一致(`unscaledTimeAsDouble` 比 `realtimeSinceStartup` 快约 30%;Unity 6 上量到 1.6 倍,帧率每秒几千帧时更多),
    所以播放模式测试按引擎时钟验证节奏,不按墙上时钟。时钟从 `Play()`/`Seek()` 之后的**下一次 `Update`** 开始计,见第 9 条末尾。
 9. **URP(补测):**

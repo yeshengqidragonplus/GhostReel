@@ -73,12 +73,25 @@ if(AC_BUILD_SHARED)
   else()
     target_compile_options(alphaclip_shared PRIVATE -Wall -Wextra)
   endif()
+  # alphaclip.dll on Windows, libalphaclip.so on Android / Linux (the CLI target already owns the name "alphaclip").
+  set_target_properties(alphaclip_shared PROPERTIES OUTPUT_NAME "alphaclip")
   if(WIN32)
-    set_target_properties(alphaclip_shared PROPERTIES PREFIX "" OUTPUT_NAME "alphaclip")
+    set_target_properties(alphaclip_shared PROPERTIES PREFIX "")
   endif()
   if(MINGW)
     # Self-contained DLL: static libc++ / libgcc / winpthreads, so it needs no runtime DLLs next to it.
     target_link_libraries(alphaclip_shared PRIVATE pthread)
     target_link_options(alphaclip_shared PRIVATE -static)
+  endif()
+  if(ANDROID)
+    # libalphaclip.so: libvpx.a and libwebm come in as static archives and would otherwise export every symbol
+    # they define (vpx_*, webm::*), clashing with other copies in the same process; --exclude-libs hides them,
+    # so the only exports are the ac_* functions. 16 KB LOAD-segment alignment is Google Play's page-size
+    # requirement; NDK r30 does it by default, say it explicitly so an older NDK cannot silently regress.
+    target_link_options(alphaclip_shared PRIVATE
+      -Wl,--exclude-libs,ALL
+      -Wl,-z,max-page-size=16384
+      -Wl,-z,common-page-size=16384
+      -Wl,--build-id=sha1)
   endif()
 endif()

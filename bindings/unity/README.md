@@ -4,14 +4,16 @@
 
 标准 VP9/WebM 视频由 C++ 核心(`core/`)在自己的线程里软解,Unity 这一层只做三件事:把字节交给核心、把 Y/U/V 三个平面传成纹理、
 用着色器画成 RGB。画面输出在一个普通的 `RenderTexture`(`AlphaClipPlayer.Output`)里,任何材质、相机、UI 都可以当普通贴图用。
-M2 只做**不透明**视频;alpha 是 M4。目前只有 **Unity 编辑器 + Windows x86_64**;Android 是 M3。
+现在只渲染**不透明**画面(alpha 片也能解,但 alpha 通道要到 M4 才渲染)。平台:**Unity 编辑器 + Windows x86_64**(M2)和 **Android arm64**(M3:Pixel 6a 上跑过 2022.3.62f2 的开发构建;
+Unity 6 上的 Android、AAB / 商店的 16 KB 检查还没做,见 `docs/m3-conclusion.md`)。
 
 ## 目录
 
 ```
 package/        UPM 包 com.alphaclip.video:Runtime(P/Invoke、播放组件、着色器)、Editor(插件导入设置)
 TestProject/    用来测试和演示的 Unity 工程(2022.3.62f2),通过 file: 依赖引用 package/
-scripts/        sync_plugin_win64.sh(把核心 DLL 拷进包)、run_editmode_tests.ps1(批处理测试)
+scripts/        sync_plugin_win64.sh / sync_plugin_android_arm64.sh(把核心 DLL / .so 拷进包)、run_editmode_tests.ps1(批处理测试)、
+                run_android_build.ps1 / run_android_bench.ps1 / compare_picture_samples.py(Android 构建、真机基准、画面对比)
 ```
 
 ## 第一次使用
@@ -41,6 +43,30 @@ renderer.material.mainTexture = player.Output; // 或者给物体加 AlphaClipRe
 也可以把组件拖到物体上,填 `Streaming Assets Path`(或 `Clip Asset`),它在 `OnEnable` 时自己打开并播放;`AlphaClipRendererBinder`
 把 `Output` 通过 MaterialPropertyBlock 挂到一个 Renderer 上,不改材质资源。想用别的时钟(音频、时间线),自己调
 `Present(long clockUs)`,不要开 `Play()`。销毁物体(`OnDestroy`)或调 `Close()` 会停掉解码线程并释放所有原生和 GPU 资源。
+
+## Android(M3)
+
+包里的 `Runtime/Plugins/Android/arm64-v8a/libalphaclip.so` 由 `AlphaClipPluginSettings` 在导入时设成仅 Android、CPU = ARM64(只有 arm64-v8a;和 DLL 一样是构建产物,不提交)。
+StreamingAssets 在 APK 里,要用 `UnityWebRequest` 读:组件会自动做到(来源里含 `://` 就走 `OpenUriAsync`),也可以手动调 `OpenStreamingAssetsAsync(path)` / `OpenUriAsync(uri)`
+(协程,`IsLoading`、`LoadError` 看状态)。包因此依赖 `com.unity.modules.unitywebrequest`。
+
+```bash
+sh core/scripts/build_core_android_arm64.sh        # NDK r30;检查 LOAD 对齐 / 导出符号,生成 build/core-android-arm64/libalphaclip.stripped.so
+sh bindings/unity/scripts/sync_plugin_android_arm64.sh
+```
+
+```powershell
+# 在 build\unity-android(工程副本)里构建开发 APK;-OfflineGuard = 不许联网(Gradle 没有缓存会失败而不是下载)
+powershell -File bindings/unity/scripts/run_android_build.ps1 -OfflineGuard
+# 真正构建:Gradle 要下载 Android Gradle Plugin 7.4.2 及依赖(约 280 MB,先问用户),放到 E: 上
+powershell -File bindings/unity/scripts/run_android_build.ps1 -GradleHome E:\Tools\gradle-home
+# 真机基准:会在手机上安装 APK、运行约 1.5 分钟、卸载(先问用户)。结果在 -OutDir 的 results.txt
+powershell -File bindings/unity/scripts/run_android_bench.ps1 -Apk build\android\m3test.apk -OutDir build\m3-bench
+python -I bindings/unity/scripts/compare_picture_samples.py <Windows 取样> build\m3-bench\results.txt
+```
+
+APK 里的 `.so` 必须是 16 KB 对齐的(构建脚本和 `llvm-readelf -lW` 检查);Unity 2022.3 官方只支持它自带的 NDK r23b,
+但这里 Unity 只打包我们预先用 NDK r30 构建好的 `.so`,不会用 NDK 编译它。Android 版的 Unity 6 没有验证过。
 
 ## 渲染管线
 
@@ -87,11 +113,11 @@ powershell -File bindings/unity/scripts/run_editmode_tests.ps1 -Demo -SnapshotDi
 
 ## 已知限制
 
-- 只有 Windows 编辑器;没有 Windows 播放器构建、Android、macOS(见设计文档里程碑)。
+- 验证过的只有 Windows 编辑器和 Pixel 6a 上的 Android 开发构建;没有 Windows 播放器构建、macOS、Android 的 release / AAB / 16 KB 页设备(见 `docs/m3-conclusion.md`)。
 - 渲染管线:内置管线、2022.3 上的 URP 14.0.12、Unity 6000.3.2f1 上的 URP 17.3.0(Render Graph)验证过。Unity 文档说在 SRP 里 `Graphics.Blit` 应在
   `RenderPipelineManager.endContextRendering` 之类的回调里调用;组件现在是在 `Update()` 里直接调用,在上面这些配置里实测正常
   (编辑模式、播放模式和演示场景),但 HDRP 没有验证,这条仍是已知风险。
 - 时钟从 `Play()` / `Seek()` 之后的下一次 `Update` 开始计,但第一张画面要等解码线程出第一帧;这段时间(Windows 纯 C 构建上 140–220 ms)时钟已经在走,
-  起始处最多丢掉这么长一段。真机上的首帧耗时 M3 再量。
-- 没有 alpha(M4)、没有音频、没有 sidecar 元数据(M4)。
-- StreamingAssets 路径用的是普通文件路径;Android 上 StreamingAssets 在 APK 里,要先用 UnityWebRequest 读出字节再 `Open(byte[])`(M3)。
+  起始处最多丢掉这么长一段。Pixel 6a 上量到 33–35 ms(含读 APK 和打开),在 640×360 的片子上不需要处理。
+- 没有 alpha 渲染(M4)、没有音频、没有 sidecar 元数据(M4)。
+- 从 StreamingAssets 读的文件整个进内存(`Open(byte[])`),大文件不适用;进后台暂停解码没有在设备上验证。

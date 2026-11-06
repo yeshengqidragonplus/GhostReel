@@ -4,7 +4,9 @@
       "version": "file:../../package",
       "depth": 0,
       "source": "local",
-      "dependencies": {}
+      "dependencies": {
+        "com.unity.modules.unitywebrequest": "1.0.0"
+      }
     },
     "com.unity.burst": {
       "version": "1.8.21",
@@ -112,6 +114,12 @@
     "com.unity.modules.ui": {
       "version": "1.0.0",
       "depth": 0,
+      "source": "builtin",
+      "dependencies": {}
+    },
+    "com.unity.modules.unitywebrequest": {
+      "version": "1.0.0",
+      "depth": 1,
       "source": "builtin",
       "dependencies": {}
     }

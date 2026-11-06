@@ -1,8 +1,11 @@
 using System;
+using System.Collections;
 using System.IO;
 using System.Runtime.InteropServices;
 using UnityEngine;
+using UnityEngine.Networking;
 using Object = UnityEngine.Object;
+using Stopwatch = System.Diagnostics.Stopwatch;   // not `using System.Diagnostics`: its Debug clashes with UnityEngine.Debug
 
 namespace AlphaClip
 {
@@ -21,6 +24,28 @@ namespace AlphaClip
     {
         Left = 0,
         Center = 1,
+    }
+
+    /// <summary>Totals of the main-thread time spent in AlphaClipPlayer.Present, in microseconds (see GetPresentTimes).</summary>
+    public readonly struct PresentTimes
+    {
+        /// <summary>Calls of Present (one per Unity frame while playing).</summary>
+        public readonly long Calls;
+        /// <summary>Calls that produced a new picture.</summary>
+        public readonly long Frames;
+        public readonly double AcquireUs, UploadUs, DrawUs;
+
+        public PresentTimes(long calls, long frames, double acquireUs, double uploadUs, double drawUs)
+        {
+            Calls = calls;
+            Frames = frames;
+            AcquireUs = acquireUs;
+            UploadUs = uploadUs;
+            DrawUs = drawUs;
+        }
+
+        /// <summary>Upload + draw per new picture, in milliseconds.</summary>
+        public double UploadDrawMsPerFrame => Frames > 0 ? (UploadUs + DrawUs) / Frames / 1000.0 : 0;
     }
 
     public readonly struct AlphaClipInfo
@@ -103,6 +128,7 @@ namespace AlphaClip
         private RenderTexture m_output;
         private Material m_material;
         private bool m_playing;
+        private bool m_loading;
         private bool m_ended;
         private double m_startRealtime;
         // Play() and Seek() are usually called in the middle of a frame; the rest of that frame (rendering, a first-use
@@ -112,6 +138,7 @@ namespace AlphaClip
         private long m_baseClockUs;
         private long m_lastPtsUs = -1;
         private long m_framesPresented;
+        private long m_timeCalls, m_timeFrames, m_timeAcquireTicks, m_timeUploadTicks, m_timeDrawTicks;
 
         // ---- public API ----------------------------------------------------------------------------------------
 
@@ -206,6 +233,69 @@ namespace AlphaClip
             Open(asset.bytes);
         }
 
+        /// <summary>True while <see cref="OpenUriAsync"/> is still reading the clip.</summary>
+        public bool IsLoading => m_loading;
+        /// <summary>Why the last <see cref="OpenUriAsync"/> failed (null after a success).</summary>
+        public string LoadError { get; private set; }
+
+        /// <summary>
+        /// Reads the clip through UnityWebRequest and opens it. This is how StreamingAssets are read on Android, where the
+        /// files are inside the APK ("jar:file://...!/assets/...") and ordinary file APIs cannot see them; any URI that
+        /// UnityWebRequest takes works (file://, jar:file://, http://). Use it as a coroutine
+        /// (<c>yield return player.OpenUriAsync(uri)</c>) and check <see cref="IsOpen"/> or <see cref="LoadError"/> afterwards;
+        /// a failure is logged and stored, not thrown, because exceptions cannot cross a coroutine.
+        /// The whole file is read into memory first (the core reads from memory anyway), so memory briefly holds two
+        /// copies; <see cref="Open(byte[])"/> keeps one native copy for the life of the clip.
+        /// </summary>
+        public IEnumerator OpenUriAsync(string uri)
+        {
+            LoadError = null;
+            m_loading = true;
+            byte[] data = null;
+            using (UnityWebRequest request = UnityWebRequest.Get(uri))
+            {
+                yield return request.SendWebRequest();
+                if (request.result == UnityWebRequest.Result.Success)
+                {
+                    data = request.downloadHandler.data;
+                }
+                else
+                {
+                    LoadError = "cannot read " + uri + ": " + request.error;
+                }
+            }
+            m_loading = false;
+            if (data != null)
+            {
+                try
+                {
+                    Open(data);
+                }
+                catch (Exception e)
+                {
+                    LoadError = "cannot open " + uri + ": " + e.Message;
+                }
+            }
+            if (LoadError != null)
+            {
+                Debug.LogError("AlphaClipPlayer: " + LoadError, this);
+            }
+        }
+
+        /// <summary>
+        /// <see cref="OpenUriAsync"/> for a path under StreamingAssets (works on every platform, including Android).
+        /// A string that already contains "://" is used as the URI as it is.
+        /// </summary>
+        public IEnumerator OpenStreamingAssetsAsync(string relativePath)
+        {
+            return OpenUriAsync(ResolveStreamingAssets(relativePath));
+        }
+
+        private static string ResolveStreamingAssets(string relativePath)
+        {
+            return relativePath.Contains("://") ? relativePath : Path.Combine(Application.streamingAssetsPath, relativePath);
+        }
+
         public void Play()
         {
             if (!IsOpen)
@@ -254,7 +344,11 @@ namespace AlphaClip
             {
                 return false;
             }
+            long t0 = Stopwatch.GetTimestamp();
             AcStatus status = AcNative.AcquireFrame(m_player, clockUs, out AcFrame frame);
+            long t1 = Stopwatch.GetTimestamp();
+            m_timeCalls++;
+            m_timeAcquireTicks += t1 - t0;
             if (status == AcStatus.End)
             {
                 m_ended = true;
@@ -267,7 +361,12 @@ namespace AlphaClip
             try
             {
                 Upload(ref frame);
+                long t2 = Stopwatch.GetTimestamp();
                 Draw();
+                long t3 = Stopwatch.GetTimestamp();
+                m_timeUploadTicks += t2 - t1;
+                m_timeDrawTicks += t3 - t2;
+                m_timeFrames++;
                 m_lastPtsUs = frame.PtsUs;
                 m_framesPresented++;
             }
@@ -276,6 +375,23 @@ namespace AlphaClip
                 AcNative.ReleaseFrame(m_player, ref frame);
             }
             return true;
+        }
+
+        /// <summary>
+        /// Main-thread CPU time spent in <see cref="Present"/> since the last <see cref="ResetPresentTimes"/> (or since the
+        /// clip was opened): taking a frame from the core, copying the three planes into textures, and submitting the
+        /// YUV-to-RGB draw. It is time on the calling thread, not GPU time.
+        /// </summary>
+        public PresentTimes GetPresentTimes()
+        {
+            double us = 1e6 / Stopwatch.Frequency;
+            return new PresentTimes(m_timeCalls, m_timeFrames, m_timeAcquireTicks * us, m_timeUploadTicks * us, m_timeDrawTicks * us);
+        }
+
+        public void ResetPresentTimes()
+        {
+            m_timeCalls = m_timeFrames = 0;
+            m_timeAcquireTicks = m_timeUploadTicks = m_timeDrawTicks = 0;
         }
 
         public AlphaClipStats GetStats()
@@ -310,13 +426,14 @@ namespace AlphaClip
             m_baseClockUs = 0;
             m_lastPtsUs = -1;
             m_framesPresented = 0;
+            ResetPresentTimes();
         }
 
         // ---- Unity messages ------------------------------------------------------------------------------------
 
         private void OnEnable()
         {
-            if (playOnEnable && !IsOpen && (clipAsset != null || !string.IsNullOrEmpty(streamingAssetsPath)))
+            if (playOnEnable && !IsOpen && !m_loading && (clipAsset != null || !string.IsNullOrEmpty(streamingAssetsPath)))
             {
                 try
                 {
@@ -326,7 +443,14 @@ namespace AlphaClip
                     }
                     else
                     {
-                        OpenFile(Path.Combine(Application.streamingAssetsPath, streamingAssetsPath));
+                        string source = ResolveStreamingAssets(streamingAssetsPath);
+                        if (source.Contains("://"))
+                        {
+                            // Android (jar:file://...) or an explicit URI: needs UnityWebRequest, so the clip opens a few frames later
+                            StartCoroutine(OpenUriAndPlay(source));
+                            return;
+                        }
+                        OpenFile(source);
                     }
                     Play();
                 }
@@ -334,6 +458,20 @@ namespace AlphaClip
                 {
                     Debug.LogError("AlphaClipPlayer: cannot open the clip: " + e.Message, this);
                 }
+            }
+        }
+
+        private void OnDisable()
+        {
+            m_loading = false;   // a coroutine that was still reading stops with the component being disabled
+        }
+
+        private IEnumerator OpenUriAndPlay(string uri)
+        {
+            yield return OpenUriAsync(uri);
+            if (IsOpen)
+            {
+                Play();
             }
         }
 

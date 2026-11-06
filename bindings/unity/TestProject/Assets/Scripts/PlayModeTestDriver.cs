@@ -113,13 +113,13 @@ namespace AlphaClip.Tests
 
         // ---------------------------------------------------------------------------------------------------------
 
-        private AlphaClipPlayer NewPlayer(bool loop, int depth = 4)
+        private AlphaClipPlayer NewPlayer(bool loop, int depth = 4, string source = null)
         {
             // Inactive while configuring, so that OnEnable (open + play) sees the settings.
             var go = new GameObject("alphaclip-player");
             go.SetActive(false);
             var p = go.AddComponent<AlphaClipPlayer>();
-            p.StreamingAssetsPath = m_clip;   // an absolute path: Path.Combine keeps it as is
+            p.StreamingAssetsPath = source ?? m_clip;   // an absolute path: Path.Combine keeps it as is
             p.Loop = loop;
             p.QueueDepth = depth;
             p.PlayOnEnable = true;
@@ -275,6 +275,78 @@ namespace AlphaClip.Tests
             int opened = AlphaClipPlayer.NativeOpenCount - opened0, closed = AlphaClipPlayer.NativeCloseCount - closed0;
             // opened: the non-looping player, the looping one and the `cycles` of the loop above
             Check(opened == cycles + 2 && closed == opened, "destroy: every native player that was opened was closed (" + opened + " opened, " + closed + " closed)");
+
+            // 5. Loading through UnityWebRequest, the way StreamingAssets are read on Android (there the URI is
+            //    jar:file://...!/assets/...; here a file:// URI exercises the same code path on any platform)
+            string uri = new Uri(Path.GetFullPath(m_clip)).AbsoluteUri;
+            opened0 = AlphaClipPlayer.NativeOpenCount;
+            closed0 = AlphaClipPlayer.NativeCloseCount;
+            var go5 = new GameObject("alphaclip-uri");   // no source configured: OnEnable does nothing
+            AlphaClipPlayer p5 = go5.AddComponent<AlphaClipPlayer>();
+            Check(!p5.IsOpen && !p5.IsLoading, "a player without a source stays closed");
+            IEnumerator load = p5.OpenUriAsync(uri);
+            while (load.MoveNext())
+            {
+                yield return load.Current;
+            }
+            Check(p5.IsOpen && !p5.IsLoading && p5.LoadError == null && p5.Info.Width > 0, "OpenUriAsync(file://) opens the clip (" + p5.Info.Width + "x" + p5.Info.Height + ")");
+            p5.Play();
+            t0 = Time.realtimeSinceStartup;
+            while (p5.FramesPresented < 5 && Time.realtimeSinceStartup - t0 < 5f)
+            {
+                yield return null;
+            }
+            Check(p5.FramesPresented >= 5, "a clip opened through UnityWebRequest plays (" + p5.FramesPresented + " pictures)");
+            Destroy(go5);
+            yield return null;
+
+            var go6 = new GameObject("alphaclip-missing");
+            AlphaClipPlayer p6 = go6.AddComponent<AlphaClipPlayer>();
+            load = p6.OpenUriAsync(new Uri(Path.GetFullPath(m_clip) + ".does-not-exist").AbsoluteUri);   // logs an error on purpose
+            while (load.MoveNext())
+            {
+                yield return load.Current;
+            }
+            Check(!p6.IsOpen && !p6.IsLoading && !string.IsNullOrEmpty(p6.LoadError), "a missing file is reported through LoadError, not thrown (" + p6.LoadError + ")");
+            Destroy(go6);
+            yield return null;
+
+            // the component path: PlayOnEnable with a URI as the source opens a few frames later and then plays
+            AlphaClipPlayer p7 = NewPlayer(true, 4, uri);
+            Check(!p7.IsOpen && p7.IsLoading, "PlayOnEnable with a URI starts loading and is not open yet");
+            t0 = Time.realtimeSinceStartup;
+            while (p7.FramesPresented < 5 && Time.realtimeSinceStartup - t0 < 5f)
+            {
+                yield return null;
+            }
+            Check(p7.IsOpen && p7.IsPlaying && p7.FramesPresented >= 5, "PlayOnEnable with a URI ends up playing (" + p7.FramesPresented + " pictures)");
+            Destroy(p7.gameObject);
+            yield return null;
+
+            // destroyed while the request is still in flight: no exception, no native player left behind
+            AlphaClipPlayer p8 = NewPlayer(true, 4, uri);
+            Destroy(p8.gameObject);
+            yield return null;
+            yield return new WaitForSeconds(0.3f);
+            opened = AlphaClipPlayer.NativeOpenCount - opened0;
+            closed = AlphaClipPlayer.NativeCloseCount - closed0;
+            Check(closed == opened, "UnityWebRequest loading: every native player that was opened was closed (" + opened + " opened, " + closed + " closed)");
+
+            // 6. Picture samples for the device comparison (M3): the same routine runs in the benchmark app on the phone;
+            //    compare_picture_samples.py compares the two. Here: the samples exist and the picture is not flat.
+            AlphaClipPlayer p9 = NewPlayer(false);
+            p9.Matrix = ColorMatrix.BT601;   // as the benchmark app sets it for the sample clips
+            string clipName = Path.GetFileName(m_clip);
+            bool produced = true;
+            foreach (double t in new[] { 0.0, 0.5, 1.0 })
+            {
+                string json = AlphaClipBenchmark.SamplePicture(p9, clipName, t);
+                m_report.AppendLine("INFO  verify " + json);
+                produced &= !json.Contains("\"pts_ms\":-");   // a picture was shown at that time
+            }
+            Check(produced, "picture samples for the device comparison were produced for t = 0, 0.5, 1.0 s");
+            Destroy(p9.gameObject);
+            yield return null;
         }
 
         /// <summary>Plays the demo scene (opened by DemoScene.PlayDemoBatch) for a moment and checks what is on screen.</summary>

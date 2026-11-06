@@ -26,8 +26,21 @@ cmake -S core -B "$OUT" -G Ninja \
     -DAC_VPX_LIB="E:/ToolsProject/GhostReel/build/libvpx-android-arm64/libvpx.a"
 cmake --build "$OUT"
 
-READELF="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-readelf.exe"
+BIN="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
+READELF="$BIN/llvm-readelf.exe"
 ls -l "$OUT/bin/alphaclip"
 "$READELF" -h "$OUT/bin/alphaclip" | grep -E 'Machine|Type'
 "$READELF" -lW "$OUT/bin/alphaclip" | grep -E 'LOAD|Type'
 "$READELF" -dW "$OUT/bin/alphaclip" | grep NEEDED || true
+
+# The shared library the Unity package ships (libalphaclip.so): checks, then a stripped copy for packaging.
+SO="$OUT/libalphaclip.so"
+echo "== $SO"
+ls -l "$SO"
+"$READELF" -lW "$SO" | grep -E 'LOAD'
+"$READELF" -dW "$SO" | grep -E 'NEEDED|SONAME'
+EXPORTS=$("$BIN/llvm-nm.exe" -D --defined-only "$SO" | awk '{print $3}' | sort)
+echo "$EXPORTS" | wc -l | sed 's/^/exported symbols: /'
+echo "$EXPORTS" | grep -v '^ac_' | sed 's/^/NOT ac_*: /' || true
+"$BIN/llvm-strip.exe" --strip-unneeded -o "$OUT/libalphaclip.stripped.so" "$SO"
+ls -l "$OUT/libalphaclip.stripped.so"

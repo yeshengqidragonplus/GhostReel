@@ -4,6 +4,9 @@
   "displayName": "AlphaClip (placeholder name)",
   "description": "Plays standard VP9/WebM video (and later its alpha) with a software decoder: the AlphaClip core library is loaded as a native plugin, the decoded YUV planes are uploaded as textures and converted to RGB by a shader into a RenderTexture. M2 prototype: opaque video in the Windows editor.",
   "unity": "2022.3",
+  "dependencies": {
+    "com.unity.modules.unitywebrequest": "1.0.0"
+  },
   "keywords": [
     "video",
     "vp9",
