@@ -1,4 +1,9 @@
-// alphaclip: developer command-line tool for the core library (M1; --meta added in M4).
+// alphaclip: command-line tool for the core library. M1: info / decode / play (developer tools); M4: --meta; M5: the
+// authoring commands encode / inspect / verify (inspect.cpp, verify.cpp, encode.cpp; see their headers).
+//
+//   alphaclip encode <input> --out <clip.webm> [...]       footage -> clip.webm + clip.acmeta.json, then verify
+//   alphaclip inspect <clip.webm>                          what is in the file and how the core reads it
+//   alphaclip verify  <clip.webm>                          is the clip fit to ship (exit code 0 / 1)
 //
 //   alphaclip info   <clip.webm> [--meta <clip.acmeta.json>]
 //   alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]
@@ -37,40 +42,47 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "alphaclip.h"
+#include "commands.h"
+#include "util.h"
 
-namespace {
+namespace cli {
 
 int Usage() {
   std::fprintf(stderr,
                "usage:\n"
-               "  alphaclip info   <clip.webm> [--meta <clip.acmeta.json>]\n"
-               "  alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]\n"
-               "  alphaclip play   <clip.webm> --out <raw.yuv> [--meta <json>] [--clock-step-us N] [--depth N]\n"
-               "                   [--realtime-speed N] [--wait-end] [--wait-queue-full] [--loop]\n"
-               "                   [--seek-us N] [--mid-seek-after N --mid-seek-us N]\n"
-               "                   [--frames N] [--timeout-ms N]\n"
+               "  alphaclip encode  <input> --out <clip.webm> [--mode auto|native_alpha|packed_right|packed_bottom|opaque]\n"
+               "                    [--straight] [--fps N] [--crf N] [--gop N] [--matrix bt601|bt709] [--range limited|full]\n"
+               "                    [--loop] [--cpu-used N] [--threads N] [--ffmpeg <file or folder>] [--force]\n"
+               "                    [--no-verify] [--quiet] [--verbose]\n"
+               "  alphaclip inspect <clip.webm> [--meta <clip.acmeta.json> | --no-meta]\n"
+               "  alphaclip verify  <clip.webm> [--meta <clip.acmeta.json> | --no-meta] [--ffmpeg <file or folder> | --no-ffmpeg]\n"
+               "  alphaclip info    <clip.webm> [--meta <clip.acmeta.json>]\n"
+               "  alphaclip decode  <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]\n"
+               "  alphaclip play    <clip.webm> --out <raw.yuv> [--meta <json>] [--clock-step-us N] [--depth N]\n"
+               "                    [--realtime-speed N] [--wait-end] [--wait-queue-full] [--loop]\n"
+               "                    [--seek-us N] [--mid-seek-after N --mid-seek-us N]\n"
+               "                    [--frames N] [--timeout-ms N]\n"
                "  alphaclip --version\n");
   return 2;
 }
 
-bool ParseInt64(const char* text, int64_t* out) {
-  if (text == nullptr || *text == '\0') return false;
-  errno = 0;
-  char* end = nullptr;
-  const long long v = std::strtoll(text, &end, 10);
-  if (errno != 0 || end == text || *end != '\0') return false;
-  *out = static_cast<int64_t>(v);
-  return true;
-}
+}  // namespace cli
+
+namespace {
+
+using cli::ParseInt64;
+
+int Usage() { return cli::Usage(); }
 
 // --meta <file>: the sidecar metadata handed to ac_open_file (NULL when the option is not given).
 std::string g_meta_text;
 const char* g_meta = nullptr;
 
 bool LoadMeta(const char* path) {
-  std::FILE* f = std::fopen(path, "rb");
+  std::FILE* f = cli::OpenFile(path, "rb");
   if (f == nullptr) {
     std::fprintf(stderr, "error: cannot open the metadata file '%s'\n", path);
     return false;
@@ -224,7 +236,7 @@ int CmdPlay(int argc, char** argv) {
     ac_close(p);
     return 2;
   }
-  std::FILE* out = std::fopen(out_path, "wb");
+  std::FILE* out = cli::OpenFile(out_path, "wb");
   if (out == nullptr) {
     std::fprintf(stderr, "error: cannot create '%s'\n", out_path);
     ac_close(p);
@@ -359,7 +371,7 @@ int CmdDecode(int argc, char** argv) {
     return 1;
   }
   int rc = 0;
-  std::FILE* out = std::fopen(out_path, "wb");
+  std::FILE* out = cli::OpenFile(out_path, "wb");
   if (out == nullptr) {
     std::fprintf(stderr, "error: cannot create '%s'\n", out_path);
     ac_close(p);
@@ -413,6 +425,14 @@ int CmdDecode(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Arguments as UTF-8 on every platform (a path with non-ASCII characters is fine on Windows too).
+  std::vector<std::string> args = cli::Utf8Args(argc, argv);
+  std::vector<char*> ptrs;
+  for (std::string& a : args) ptrs.push_back(&a[0]);
+  ptrs.push_back(nullptr);
+  argc = static_cast<int>(args.size());
+  argv = ptrs.data();
+
   if (argc >= 2 && std::strcmp(argv[1], "--version") == 0) {
     std::printf("alphaclip core %s\n", ac_version());
     return 0;
@@ -420,5 +440,8 @@ int main(int argc, char** argv) {
   if (argc >= 3 && std::strcmp(argv[1], "info") == 0) return CmdInfo(argc, argv);
   if (argc >= 3 && std::strcmp(argv[1], "decode") == 0) return CmdDecode(argc, argv);
   if (argc >= 3 && std::strcmp(argv[1], "play") == 0) return CmdPlay(argc, argv);
+  if (argc >= 3 && std::strcmp(argv[1], "inspect") == 0) return cli::CmdInspect(argc, argv);
+  if (argc >= 3 && std::strcmp(argv[1], "verify") == 0) return cli::CmdVerify(argc, argv);
+  if (argc >= 3 && std::strcmp(argv[1], "encode") == 0) return cli::CmdEncode(argc, argv);
   return Usage();
 }

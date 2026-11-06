@@ -80,6 +80,7 @@ Meta ParseMeta(const char* json) {
   const std::string* mode = OptionalString(root, "alpha_mode");
   if (mode == nullptr) Bad("'alpha_mode' is required");
   m.present = true;
+  m.schema = 1;
   m.alpha_mode = ParseAlphaMode(*mode);
   m.premultiplied = OptionalBool(root, "premultiplied", false);
   m.loop_hint = OptionalBool(root, "loop_hint", false);

@@ -60,7 +60,7 @@ int64_t TicksToUs(int64_t ticks, uint64_t scale_ns) {
 // Collects the index of the first video track.
 class Collector final : public webm::Callback {
  public:
-  explicit Collector(uint64_t file_size) : file_size_(file_size) {}
+  Collector(uint64_t file_size, bool collect_cues) : file_size_(file_size), collect_cues_(collect_cues) {}
 
   webm::Status OnElementBegin(const webm::ElementMetadata& m, webm::Action* action) override {
     // No element may claim to extend past the end of the file. This bounds every
@@ -108,28 +108,87 @@ class Collector final : public webm::Callback {
     return webm::Status(webm::Status::kOkCompleted);
   }
 
-  webm::Status OnClusterBegin(const webm::ElementMetadata&, const webm::Cluster& c,
+  webm::Status OnSegmentBegin(const webm::ElementMetadata& m, webm::Action* action) override {
+    // Cue positions count from the first byte after the Segment header. (OnElementBegin has already checked that
+    // position + header_size lies inside the file.)
+    if (m.position != webm::kUnknownElementPosition && m.header_size != webm::kUnknownHeaderSize) {
+      segment_data_start_ = m.position + m.header_size;
+    }
+    *action = webm::Action::kRead;
+    return webm::Status(webm::Status::kOkCompleted);
+  }
+
+  webm::Status OnClusterBegin(const webm::ElementMetadata& m, const webm::Cluster& c,
                               webm::Action* action) override {
     const uint64_t tc = c.timecode.value();
     if (tc > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       throw Failure(AC_ERR_FORMAT, "cluster timecode is out of range");
     }
     cluster_timecode_ = static_cast<int64_t>(tc);
+    if (collect_cues_) {
+      if (clusters_.size() >= kMaxPackets) {
+        throw Failure(AC_ERR_OOM, "too many clusters (limit " + std::to_string(kMaxPackets) + ")");
+      }
+      ClusterRef ref;
+      if (m.position != webm::kUnknownElementPosition && m.header_size != webm::kUnknownHeaderSize) {
+        ref.position = m.position;
+        ref.data_start = m.position + m.header_size;
+      }
+      clusters_.push_back(ref);
+    }
     *action = webm::Action::kRead;
     return webm::Status(webm::Status::kOkCompleted);
   }
 
-  webm::Status OnSimpleBlockBegin(const webm::ElementMetadata&, const webm::SimpleBlock& sb,
+  webm::Status OnBlockGroupBegin(const webm::ElementMetadata& m, webm::Action* action) override {
+    group_pos_ = m.position == webm::kUnknownElementPosition ? 0 : m.position;
+    *action = webm::Action::kRead;
+    return webm::Status(webm::Status::kOkCompleted);
+  }
+
+  webm::Status OnSimpleBlockBegin(const webm::ElementMetadata& m, const webm::SimpleBlock& sb,
                                   webm::Action* action) override {
-    BeginBlock(sb.track_number, sb.timecode);
+    BeginBlock(sb.track_number, sb.timecode, m.position == webm::kUnknownElementPosition ? 0 : m.position);
     *action = webm::Action::kRead;
     return webm::Status(webm::Status::kOkCompleted);
   }
 
   webm::Status OnBlockBegin(const webm::ElementMetadata&, const webm::Block& b,
                             webm::Action* action) override {
-    BeginBlock(b.track_number, b.timecode);
+    BeginBlock(b.track_number, b.timecode, group_pos_);  // a Cue points at the BlockGroup, not the Block inside it
     *action = webm::Action::kRead;
+    return webm::Status(webm::Status::kOkCompleted);
+  }
+
+  webm::Status OnCuePoint(const webm::ElementMetadata&, const webm::CuePoint& cp) override {
+    if (!collect_cues_) return webm::Status(webm::Status::kOkCompleted);
+    CueRef base;
+    base.has_time = cp.time.is_present();
+    if (base.has_time) {
+      const uint64_t t = cp.time.value();
+      if (t > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw Failure(AC_ERR_FORMAT, "cue time is out of range");
+      }
+      base.time_us = TicksToUs(static_cast<int64_t>(t), timecode_scale_ns_);
+    }
+    auto push = [this](const CueRef& c) {
+      if (cues_.size() >= kMaxPackets) {
+        throw Failure(AC_ERR_OOM, "too many cue points (limit " + std::to_string(kMaxPackets) + ")");
+      }
+      cues_.push_back(c);
+    };
+    if (cp.cue_track_positions.empty()) push(base);
+    for (const auto& e : cp.cue_track_positions) {
+      CueRef c = base;
+      const webm::CueTrackPositions& pos = e.value();
+      c.has_track = pos.track.is_present();
+      if (c.has_track) c.track = pos.track.value();
+      c.has_cluster_position = pos.cluster_position.is_present();
+      if (c.has_cluster_position) c.cluster_position = pos.cluster_position.value();
+      c.has_relative_position = pos.relative_position.is_present();
+      if (c.has_relative_position) c.relative_position = pos.relative_position.value();
+      push(c);
+    }
     return webm::Status(webm::Status::kOkCompleted);
   }
 
@@ -183,15 +242,22 @@ class Collector final : public webm::Callback {
       }
     }
     s.packets = std::move(packets_);
+    if (collect_cues_) {
+      s.video_track = video_track_;
+      s.segment_data_start = segment_data_start_;
+      s.clusters = std::move(clusters_);
+      s.cues = std::move(cues_);
+    }
     return s;
   }
 
  private:
-  void BeginBlock(uint64_t track, int16_t rel_timecode) {
+  void BeginBlock(uint64_t track, int16_t rel_timecode, uint64_t element_pos) {
     cur_is_video_ = video_track_ != 0 && track == video_track_;
     frames_in_block_ = 0;
     cur_offset_ = 0;
     cur_size_ = 0;
+    cur_element_pos_ = element_pos;
     if (cur_is_video_) {
       const int64_t ticks = cluster_timecode_ + rel_timecode;  // cluster_timecode_ <= INT64_MAX
       cur_pts_us_ = TicksToUs(ticks, timecode_scale_ns_);
@@ -207,6 +273,10 @@ class Collector final : public webm::Callback {
       p.pts_us = cur_pts_us_;
       p.color_offset = cur_offset_;
       p.color_size = cur_size_;
+      if (collect_cues_) {
+        p.element_pos = cur_element_pos_;
+        p.cluster = clusters_.empty() ? 0 : static_cast<uint32_t>(clusters_.size() - 1);
+      }
       if (bg != nullptr && bg->additions.is_present()) {
         for (const auto& more : bg->additions.value().block_mores) {
           if (more.value().id.value() == 1) p.alpha = more.value().data.value();
@@ -219,6 +289,12 @@ class Collector final : public webm::Callback {
   }
 
   const uint64_t file_size_;
+  const bool collect_cues_;
+  uint64_t segment_data_start_ = 0;
+  uint64_t group_pos_ = 0;
+  uint64_t cur_element_pos_ = 0;
+  std::vector<ClusterRef> clusters_;
+  std::vector<CueRef> cues_;
   uint64_t timecode_scale_ns_ = 1000000;
   double duration_ticks_ = 0;
   uint64_t video_track_ = 0;
@@ -239,8 +315,8 @@ class Collector final : public webm::Callback {
 
 }  // namespace
 
-StreamIndex ParseWebm(const uint8_t* data, size_t size) {
-  Collector collector(size);
+StreamIndex ParseWebm(const uint8_t* data, size_t size, bool collect_cues) {
+  Collector collector(size, collect_cues);
   MemoryReader reader(data, size);
   webm::WebmParser parser;
   const webm::Status status = parser.Feed(&collector, &reader);

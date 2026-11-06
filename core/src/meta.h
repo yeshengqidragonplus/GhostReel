@@ -11,6 +11,7 @@ namespace ac {
 
 struct Meta {
   bool present = false;  // false: no sidecar was given ("auto" mode)
+  int schema = 0;        // the sidecar's "schema" (always 1 for a Meta this core accepts); 0 without a sidecar
   int alpha_mode = AC_ALPHA_OPAQUE;
   bool premultiplied = false;
   int color_range = AC_RANGE_UNSPECIFIED;

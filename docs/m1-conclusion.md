@@ -99,6 +99,9 @@ M1 的四个边界片(`samples/m1/gen_clips.ps1`)。
 > 共享库目标(Windows `.dll`、Android `.so`,隐藏符号、静态 libc++、LOAD 段 16 KB 对齐)——**完成**(M2 做了 `.dll`,M3 做了 `.so`);Unity 里加载、纹理上传、播放组件——**完成**(M2);
 > 性能基线——M3 做了应用内、**未固定核**的第一份,**固定核类型的基线仍未做**(m3-conclusion);平面拷贝——640×360 下不成问题(上传约 0.23 ms/张),暂不去掉,1080p 没量;
 > 更强的模糊测试、TSan、浸泡测试——M3 **没有做**,仍然开着;关键帧错位的真实样本和 `verify`——仍是 M5;sidecar——M4 已做(见 m4-conclusion)。
+>
+> **M5 之后的处理结果(2026-11-06 加注):** 关键帧错位的真实样本和 `verify`——**完成**(M5:`core/tests/test_authoring.py` 里手工拼的 WebM,颜色每 30 帧、alpha 每 20 帧一个关键帧;`alphaclip verify` 报 `keyframes` warn 和 `cues` FAIL,核心照样解码正确、seek 退回到两路都是关键帧的点,与 ffmpeg 一致;见 [m5-notes.md](m5-notes.md))。
+> 更强的模糊测试(覆盖率引导)、TSan、浸泡测试仍然开着;M5 只对新的 `inspect` / `verify` 做了 3600 例确定性变异。
 
 ## 产物
 

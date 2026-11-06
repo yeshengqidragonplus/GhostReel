@@ -5,7 +5,7 @@ Run isolated:
       clip.webm [--cases N] [--seed S]
 
 Each case mutates the clip (fixed seed, so a failure reproduces) and runs `decode` or the threaded
-`play` on it. Clean outcomes are exit code 0 (still decodable), 1 (error reported) or 2 (usage);
+`play` on it (with --command authoring: `inspect` or `verify --no-ffmpeg`). Clean outcomes are exit code 0 (still decodable), 1 (error reported) or 2 (usage);
 anything else is a crash (access violation, abort, ...), and a run that exceeds the time limit is
 a hang. Failing inputs are kept in <workdir>/fail/ together with the command that triggered them.
 
@@ -33,6 +33,9 @@ IDS = {
     "BlockMore": bytes.fromhex("a6"), "BlockAdditional": bytes.fromhex("a5"),
     "Cues": bytes.fromhex("1c53bb6b"), "PixelWidth": bytes.fromhex("b0"),
     "PixelHeight": bytes.fromhex("ba"), "AlphaMode": bytes.fromhex("53c0"),
+    # M5: the Cues that `inspect` / `verify` read
+    "CuePoint": bytes.fromhex("bb"), "CueTime": bytes.fromhex("b3"), "CueTrackPositions": bytes.fromhex("b7"),
+    "CueTrack": bytes.fromhex("f7"), "CueClusterPosition": bytes.fromhex("f1"), "CueRelativePosition": bytes.fromhex("f0"),
 }
 
 
@@ -91,6 +94,9 @@ def main():
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--cases", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=20261105)
+    ap.add_argument("--command", choices=("decode", "authoring"), default="decode",
+                    help="decode (default): `decode` and the threaded `play`; authoring: `inspect` and `verify --no-ffmpeg` "
+                         "(the container analysis, Cues and keyframe checks of M5)")
     ap.add_argument("clip")
     a = ap.parse_args()
     cli, work, clip = (os.path.abspath(x) for x in (a.cli, a.workdir, a.clip))
@@ -108,8 +114,10 @@ def main():
         kind = kinds[i % len(kinds)]
         mutated = mutate(data, rng, kind)
         open(case_path, "wb").write(mutated)
-        # alternate the synchronous decode and the threaded player
-        if i % 4 == 3:
+        # alternate the synchronous decode and the threaded player (or, for M5, inspect and verify)
+        if a.command == "authoring":
+            cmd = [cli, "inspect", case_path] if i % 2 == 0 else [cli, "verify", case_path, "--no-ffmpeg"]
+        elif i % 4 == 3:
             cmd = [cli, "play", case_path, "--out", out, "--depth", "8", "--realtime-speed", "50", "--timeout-ms", "10000"]
         else:
             cmd = [cli, "decode", case_path, "--out", out]

@@ -27,7 +27,10 @@ target_include_directories(ac_webm_parser
   PRIVATE "${AC_WEBM_ROOT}/webm_parser")
 
 find_package(Threads REQUIRED)
+# analyze.cpp (container facts for the authoring tools: Cues, keyframes) is only in the static library the CLI links; the
+# shared library the engines load does not need it.
 add_library(alphaclip_core STATIC
+  src/analyze.cpp
   src/api.cpp
   src/clip.cpp
   src/demuxer.cpp

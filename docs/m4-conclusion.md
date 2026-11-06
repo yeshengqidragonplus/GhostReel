@@ -84,3 +84,6 @@ UI 路径(RawImage + 预乘 UI 着色器)与场景路径的数字相同;`RectMas
   `bindings/unity/TestProject/Assets/{Scripts/AlphaClipTruth.cs,Scripts/PlayModeTestDriver.cs,Editor/AlphaClipEditModeTests.cs,Editor/AlphaClipEditModeAlphaTests.cs}`、`bindings/unity/scripts/run_editmode_tests.ps1`。
 - 提交:见 `git log`;都在本地,没有 push。
 - 剩余项(Pixel 6a 上的 M4、Unity 6)你选择按现状定稿,没有先补做;它们记在"给后续的交接"里,不阻塞 M5,也不要当作已经做过。
+
+> **M5 之后的处理结果(2026-11-06 加注,上面的正文是 M4 定稿时的原样):** "直通色、透明处填黑"的素材 M5 在 CPU 上量过了(见 [m5-notes.md](m5-notes.md)):柔边素材怎么存都干净;1.5 像素的硬边上,放大 2× 后直通且透明处填黑的软边均值 −2.5 个灰度级(暗圈),
+> 预乘 +1.5,直通且颜色延续的 0.0;GPU 上的放大没量。Pixel 6a 上的 M4 和 Unity 6 仍然没有做(M5 也没有补)。M5 的 `encode` 生成的四个片子过了本阶段的 Unity 矩阵(2022.3.62f2、内置管线、Gamma 和 Linear,151/151 × 2)。

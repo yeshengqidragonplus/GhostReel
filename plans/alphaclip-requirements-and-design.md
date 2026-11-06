@@ -84,6 +84,9 @@
 | TR-4 | 本地预览页:拖入文件、切换背景色、调参数,所见即所得 |
 | TR-5 | `keyed` 模式的参数/查找表生成器(P2,研究性质) |
 
+> **M5(2026-11-06,结论为草稿):** TR-1 到 TR-3 已在 `alphaclip.exe` 里实现(`encode` / `inspect` / `verify`,C++,见 `docs/m5-notes.md`)。与上面的需求的差异:① `encode` 调用**外部 ffmpeg**(libvpx-vp9;GPL,所以只当程序启动,不链接、不随包发行),输入是视频文件或 PNG 序列;
+> ② 颜色默认**预乘**(`--straight` 保持原样,没有扩边);③ `encode` 写出之前先跑 `verify`;④ `verify` 除了"与参考输出逐帧比对"(对 ffmpeg 逐字节)还查时间戳、两路关键帧是否对齐、Cues、seek、alpha 合理性;没有做对源素材的 PSNR。
+
 ## 4. 总体架构
 
 ```
@@ -351,7 +354,7 @@ void ac_close(ac_player*);
 | **M2 Unity 编辑器原型** ✅ | Windows 编辑器里播放不透明视频(核心的 Windows 共享库 + Unity 包;内置管线和 URP) | 画面正确、能循环、不泄漏。**已完成(2026-11-05),结论见 `docs/m2-conclusion.md`**(2022.3.62f2 和 6000.3.2f1;HDRP、Windows 播放器构建未测) |
 | **M3 Android 真机** ✅ | 同一套代码在 Pixel 6a 上播放;记录性能基线 | 真机播放正确,基线数据入库。**已完成(2026-11-06),结论见 `docs/m3-conclusion.md`**(Unity 2022.3.62f2 开发构建,Pixel 6a / Android 15;画面与 Windows 编辑器最大差 1,丢帧 0,基线未固定核;Unity 6 上的 Android、AAB / Play 16 KB 检查、16 KB 页设备、固定核基线未做) |
 | **M4 透明(基础)** ✅ | `packed_right`/`packed_bottom` + `native_alpha`,预乘输出 | 在 UI 和场景里叠加无黑边。**已完成(2026-11-06),结论见 `docs/m4-conclusion.md`**(Windows 编辑器,2022.3.62f2,内置管线和 URP,Gamma 和 Linear,场景和 UI 两条路径,对精确真值带负向对照;Pixel 6a 上的 M4、Unity 6、HDRP、`keyed`、边缘后处理、"直通色 + 透明处填黑"的素材未做) |
-| **M5 制作工具** | `encode` / `inspect` / `verify` 命令行 | 一条命令把素材变成可播放的包 |
+| **M5 制作工具** ✅(草稿) | `encode` / `inspect` / `verify` 命令行 | 一条命令把素材变成可播放的包。**已实现并在 Windows 上验证(2026-11-06,结论是草稿,见 `docs/m5-conclusion.md`)**(外部 ffmpeg 编码,颜色默认预乘;`test_authoring.py` 181 项、3600 例变异、工具生成的四个片子过了 M4 的 Unity 矩阵 151/151 × 2;Pixel 6a、Unity 6 / URP / HDRP 上用工具生成的片子、真实素材、1080p 和编码速度、消毒器运行、自带编码器、扩边未做) |
 | **M6 预览页** | 本地 WebGL 预览,和 Unity 渲染对比 | 预览与引擎结果肉眼一致 |
 | **M7 边缘与 keyed** | 边缘后处理;绿幕 + 查找表抠图与生成器 | 质量指标达标,有对比图 |
 | **M8 Godot** | GDExtension,`VideoStreamPlayer` 可用 | 示例场景里播放透明视频 |
@@ -375,14 +378,14 @@ void ac_close(ac_player*);
 |---|---|---|
 | R1 | 软解 VP9 在低端 Android 上吃不消 | M3 建立基线;限制分辨率和并发;后期加 MediaCodec 通道。**M0/M1 数据点:** Pixel 6a、640×360、单线程,核心库解码线程(彩色加 alpha,含平面拷贝)约 1.1–1.4 ms/帧(大核)、2.2–2.4(中核)、4.4–4.8(小核);alpha 片比不透明片多约 40%;同一类核上单帧耗时就有 ±25% 的抖动,基线必须固定核、多次重复、记录频率和温度;目标规格未定,不要外推(见 docs/m1-conclusion.md)。**M3 数据点:** 应用内、未固定核、同一台手机、640×360:解码线程 4.7 ms/帧(不透明)、6.3(alpha 片),比 M1 固定小核的数慢约 1.4 倍(推断是调度器放在了小核且频率较低,没有记录运行期间的核和频率);固定核基线还没做(见 docs/m3-conclusion.md) |
 | R2 | ~~libvpx 读不到 WebM 原生 alpha,或行为不稳定~~ | **已关闭(M0,2026-11-05):** `native_alpha` 可行,见 `docs/m0-conclusion.md`。残留的关键帧对齐问题见 R10 |
-| R3 | Unity Linear 色彩空间下抠边偏色 | 着色器里显式处理转换;黄金图覆盖两种色彩空间。**M2:** 不透明的 YUV→RGB 路径在 Gamma 和 Linear 工程下读回都与独立 CPU 参考最大差 1(着色器按 `QualitySettings.activeColorSpace` 自动处理);`keyed` 的抠边路径还没做。**M4:** 透明合成在 Gamma 和 Linear 下都对精确 RGBA 真值验证过(半透明边缘带符号均值在 ±0.15 个灰度级以内,三个负向对照 −19…+21 / −6…+14),Linear 下在线性空间预乘、在线性帧缓冲混合;"直通色、透明处填黑"的素材没测过 |
+| R3 | Unity Linear 色彩空间下抠边偏色 | 着色器里显式处理转换;黄金图覆盖两种色彩空间。**M2:** 不透明的 YUV→RGB 路径在 Gamma 和 Linear 工程下读回都与独立 CPU 参考最大差 1(着色器按 `QualitySettings.activeColorSpace` 自动处理);`keyed` 的抠边路径还没做。**M4:** 透明合成在 Gamma 和 Linear 下都对精确 RGBA 真值验证过(半透明边缘带符号均值在 ±0.15 个灰度级以内,三个负向对照 −19…+21 / −6…+14),Linear 下在线性空间预乘、在线性帧缓冲混合;"直通色、透明处填黑"的素材 M4 没测过。**M5:** 在 CPU 上量了(`docs/m5-notes.md`):柔边素材怎么存都干净;1.5 像素的硬边上,直通且透明处填黑的素材在放大 2× 后软边均值 −2.5 个灰度级(暗圈),预乘 +1.5(略偏亮,不变暗),直通且颜色延续到透明区域下面的最准(0.0);GPU 上的放大没量 |
 | R4 | 三个引擎的纹理上传接口细节和版本差异 | 每个引擎只做薄层;API 名称实现时核对官方文档 |
 | R5 | Android 16 KB 页大小等平台新要求 | M3 时按 Google 官方最新文档核对并用对应 NDK 构建。**M0:** NDK r30 默认 16 KB 对齐(已验证 ELF 段对齐);APK 内 zip 对齐和 Play 检查留到 M3;Unity 2022.3 需 ≥ 2022.3.56f1 且 Burst ≥ 1.8.21。**M3:** ELF 层已验证(`.so` 与 APK 里 Unity 自己的库都是 0x4000);zip 对齐只在压缩存放的开发 APK 上通过,AAB / Play Console 检查未做 |
 | R6 | `keyed` 抠图质量上限不明 | 放在 M7,先用并排/原生 alpha 打通主链路 |
 | R7 | 着色器多端生成产生漂移 | 黄金图测试 + 单一主源 |
 | R8 | 多实例同时解码导致卡顿 | 全局并发上限与降级策略(FR-10) |
-| R9 | WebM 无 Cues 时 seek 慢或失败 | 制作工具强制写入 Cues;`verify` 检查。**M1:** 核心打开时扫描整个文件建完整的包索引,seek 不依赖 Cues,此风险对核心不成立;Cues 仍有意义(其他播放器、以后从磁盘流式读取) |
-| R10 | `native_alpha` 的彩色流与 alpha 流关键帧不对齐(如场景切换),seek 后 alpha 无法解码(M0 新增) | M5 的 `verify` 检查"每个 Cues 指向的块,两路都是关键帧";M0 样本是固定 GOP,错位情况未测 |
+| R9 | WebM 无 Cues 时 seek 慢或失败 | 制作工具强制写入 Cues;`verify` 检查。**M1:** 核心打开时扫描整个文件建完整的包索引,seek 不依赖 Cues,此风险对核心不成立;Cues 仍有意义(其他播放器、以后从磁盘流式读取)。**M5:** `encode` 用的 ffmpeg 默认写 Cues,`verify` 检查它们存在、每个 Cue 的簇位置 / 时间 / 相对位置都对得上包、且指向两路都是关键帧的包,没有 Cues 算失败 |
+| R10 | `native_alpha` 的彩色流与 alpha 流关键帧不对齐(如场景切换),seek 后 alpha 无法解码(M0 新增) | M5 的 `verify` 检查"每个 Cues 指向的块,两路都是关键帧";M0 样本是固定 GOP,错位情况未测。**M5:** `encode` 固定 GOP(`-g N -keyint_min N`)让两路关键帧在同样的位置;`verify` 做了上面的检查和"有的包只在一路是关键帧"的警告;用测试里手工拼的 WebM(颜色每 30 帧、alpha 每 20 帧一个关键帧)得到了真实样本:Cue 指向的包只在颜色流是关键帧 → `verify` FAIL,核心仍解码正确、seek 退回到两路都是关键帧的点(只有第 0 帧时就从头解码),与 ffmpeg 一致。编码器自己因场景切换插入关键帧的素材没有构造过 |
 
 ### 13.2 待你决定的事项
 
