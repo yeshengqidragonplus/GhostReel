@@ -26,7 +26,8 @@ namespace AlphaClip.Editor
             else if (assetPath.EndsWith("/libalphaclip.so", StringComparison.Ordinal))
             {
                 // Android arm64-v8a only. The "CPU" platform-data key is what the Inspector's CPU drop-down writes
-                // (the docs do not list it: the APK contents are checked in M3 to prove it took effect).
+                // (the docs do not list it: M3 confirmed it through the .meta Unity writes, "Android: CPU: ARM64" and
+                // "Is16KbAligned: true", and through the contents of the built APK; recheck after a Unity upgrade).
                 importer.SetCompatibleWithAnyPlatform(false);
                 importer.SetCompatibleWithEditor(false);
                 importer.SetCompatibleWithPlatform(BuildTarget.Android, true);

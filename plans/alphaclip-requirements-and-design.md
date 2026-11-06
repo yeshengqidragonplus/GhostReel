@@ -310,6 +310,9 @@ void ac_close(ac_player*);
 | 暂停 | 应用切后台时暂停解码线程,回到前台后恢复 |
 | 日志 | 统一前缀,错误带 `ac_last_error` 的文本 |
 
+> **M3 对这张表的状态(Unity 绑定):** 生命周期(销毁 ⇒ `ac_close`)已在 Unity 编辑器和 Pixel 6a 上跑通(含加载 StreamingAssets 期间销毁物体);
+> "进后台暂停"目前只靠"队列满了解码线程自己停",没有单独实现,也没有在设备上验证;并发上限与降级为静态首帧(FR-10)没做;日志:Unity 绑定的错误日志统一带 `AlphaClipPlayer: ` 前缀、文本含核心的 `ac_last_error`,跨引擎的统一前缀等有第二个绑定时再定。见 `docs/m3-conclusion.md`。
+
 ## 10. 测试与质量
 
 | 类别 | 做法 |
@@ -317,7 +320,7 @@ void ac_close(ac_player*);
 | 解码正确性 | 同一段视频,核心库输出的 YUV 与 ffmpeg 参考输出逐帧比较(MD5 / PSNR) |
 | 着色器黄金图 | 每个引擎渲染固定测试画面,与参考图比对(允许小容差) |
 | 透明质量 | 用已知真值(带 alpha 的渲染)合成绿幕,再抠回,计算 alpha 误差 |
-| 性能基线 | 解码 ms/帧、上传 ms/帧、主线程占用、内存;在 Pixel 6a 上先测,后续补低端机 |
+| 性能基线 | 解码 ms/帧、上传 ms/帧、主线程占用、内存;在 Pixel 6a 上先测,后续补低端机。**M3:** 第一份应用内基线已有(未固定核、640×360、CPU 侧提交时间,见 `docs/m3-conclusion.md`);固定核、低端机、1080p、并发、GPU 侧耗时未测 |
 | 稳定性 | 循环播放 1 小时浸泡;反复创建销毁 1000 次;损坏文件模糊测试 |
 | 测试素材 | **只用自己生成的测试片**,不使用任何第三方游戏的素材 |
 
@@ -420,15 +423,21 @@ alphaclip/
 └─ samples/                  自己生成的测试片和示例工程
 ```
 
-## 附录 C:本机环境(2026-11-04 初稿,2026-11-05 按 M0 更新)
+> **实际进展(2026-11-06,M3 之后):** 已建的有 `docs/`(M0–M3 的结论、笔记和 M3 的设备基准数据)、`core/{include,src,scripts,tests}`、`core/third_party/{libvpx,libwebm}`(git 子模块)、
+> `core/spikes/`(M0 的一次性代码,不在上图里)、`tools/cli`、`bindings/unity/{package,TestProject,scripts}`、`samples/{m0,m1}`。**本文档本身仍在 `plans/`,没有移进 `docs/`**
+> (CLAUDE.md 和各结论文档都按 `plans/` 引用它,要移的话要一起改链接)。还没建的有 `shaders/`、`bindings/{godot,cocos}`、`tools/preview`。构建产物在 `build/`(git 忽略)。
+
+## 附录 C:本机环境(2026-11-04 初稿,2026-11-05 按 M0 更新,2026-11-06 按 M3 更新)
 
 | 项 | 状态 |
 |---|---|
-| Unity | 已装,编辑器在 `D:\Program Files\Unity\Hub\Editor`:2022.3.20f1c1、2022.3.62f2(都自带 NDK r23b)、6000.2.10f1、6000.3.2f1(后两者没装 Android 模块) |
+| Unity | 已装,编辑器在 `D:\Program Files\Unity\Hub\Editor`:2022.3.20f1c1、2022.3.62f2(都自带 NDK r23b)、6000.2.10f1、6000.3.2f1(后两者没装 Android 模块;**M3:** 2022.3.62f2 的 Android 模块已装,用它构建并在真机上跑过 APK;你自己的 MergeX2 工程可能同时在一个 2022.3.62f2 编辑器里开着) |
 | Cocos Creator | 3.8.8,`C:\ProgramData\cocos\editors\Creator\3.8.8` |
 | Godot | 4.7,`D:\Tools\godot-4.7` |
-| Android SDK | `E:\AndroidSDK`;`ndk-bundle` 是空壳。M0 装了 NDK r30:`E:\AndroidSDK\ndk\30.0.16248370` |
-| 真机 | Pixel 6a(adb 已连接;M0 在上面跑通过,Android 15,4 KB 页) |
+| Android SDK | `E:\AndroidSDK`;`ndk-bundle` 是空壳。M0 装了 NDK r30:`E:\AndroidSDK\ndk\30.0.16248370`;M3 用到 `build-tools\35.0.0`(zipalign、aapt2)和 `platform-tools\adb.exe` |
+| Gradle 缓存(M3 新增) | `E:\Tools\gradle-home`,277.5 MB、988 个文件(Android Gradle Plugin 7.4.2 及依赖,你同意后下载;只通过 `GRADLE_USER_HOME` 给 Android 构建用) |
+| 真机 | Pixel 6a(adb 已连接;M0、M1、M3 在上面跑过,Android 15 / API 35,Mali-G78,Vulkan,4 KB 页;每次往上装东西都要先问你) |
+| 磁盘剩余(2026-11-06) | C: 约 30 GB,D: 约 27 GB,E: 约 88 GB;大的东西放 E: |
 | 已有运行时 | Java 11、Python 3.12、Node、.NET |
 | M0 新装(均不在 PATH,装在 `E:\Tools`) | CMake 4.4.4、Ninja 1.13.2、llvm-mingw(clang);另有 ffmpeg 9.0.2,仅作外部工具。Windows 上暂无 nasm,libvpx 为纯 C 构建 |
 | 你自己的项目 | 已使用 YooAsset(`com.tuyoogame.yooasset`) |

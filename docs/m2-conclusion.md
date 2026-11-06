@@ -88,6 +88,12 @@ Unity 6 + URP 17 需要下载五个小包(共 3.75 MB,你同意之后下的,只�
 | alpha:`Output` 的 alpha 通道、预乘、混合 | M4 |
 | 着色器单一主源 + 生成脚本(现在的 Unity 着色器是第一个变体) | 设计里的后续阶段 |
 
+> **M3 之后的处理结果(2026-11-06 加注,上面的正文是 M2 定稿时的原样):**
+> Android 共享库和 Unity 的 Android 插件设置——**完成**(m3-notes 第 2、3 条);StreamingAssets 经 UnityWebRequest 读取——**完成**,真机上实际走过;
+> 性能基线——**有第一份**(应用内、未固定核、640×360,见 m3-conclusion 的数字),平面拷贝和 RenderTexture 这一遍在这个规格下不需要改,1080p 没量;
+> Unity 6 ——**仍未决定**,Android 上没验证(Android 模块没装);起始处时钟——Pixel 6a 上首张画面 33–35 ms,**不需要**"等第一帧再起算",片子更大时再看;
+> Unity 6 工程里 URP 17 依赖包的管理方式——**仍未处理**;HDRP、alpha、着色器生成脚本——不变。
+
 ## 产物
 
 - 核心:`core/CMakeLists.txt`(共享库目标)、`core/src/api.cpp`(ABI 布局的 `static_assert`)、`core/tests/test_shared_lib.py`。

@@ -168,6 +168,11 @@ Windows 冒烟编译已通过:C++17 的 C ABI DLL(含 `std::string/vector/unique
 | `core/third_party/{libvpx,libwebm}` 的提交方式 | 已处理,可改 | 用户未另行指定,首个提交按默认作为 **git submodule**(浅克隆,固定在 libvpx v1.17.0 `6df3ec3`、libwebm-1.0.0.32 `f2a982d`)。想改成 vendoring 或忽略,在 push 之前重做即可 |
 | §13.2 的未决事项:项目名、许可证、素材是真 alpha 还是绿幕、目标分辨率/帧率/并发、音频、最低 Unity 版本、第一阶段平台 | 用户决定 | M0 没有替这些做假设 |
 
+> **M3 之后的处理结果(2026-11-06 加注,上面的正文是 M0 定稿时的原样):**
+> 真实 AAB 上验证 16 KB——**只做了一部分**:`libalphaclip.so` 和 Unity 打出的开发 APK 里 5 个库的 ELF LOAD 对齐都是 0x4000,Unity 2022.3.62f2 + Burst 构建通过、Unity 写出 `Is16KbAligned: true`;
+> **AAB、不压缩存放的 `.so`、Play 控制台检查、16 KB 页设备上加载都没做**;性能基线——M3 做了应用内、**未固定核**、640×360 的第一份,按核类型固定、多线程、真实素材、目标规格仍未做;
+> §13.2 的未决事项——都**仍未决定**。
+
 ## 产物清单
 
 - `core/spikes/m0_alpha_probe/`:`alpha_probe.cpp`(验证程序)、`CMakeLists.txt`、`build_win.sh`(libvpx + 探针的完整构建)、
