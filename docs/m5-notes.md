@@ -1,7 +1,7 @@
 # M5 笔记
 
 M5 = 制作工具:`alphaclip encode` / `inspect` / `verify` 三个命令(设计文档 §3.3 的 TR-1 到 TR-3),完成标准"一条命令把素材变成可播放的包"(§11)。
-结论见 [m5-conclusion.md](m5-conclusion.md)。本文记录 M5 里做的设计决定、命令的用法和规则、量到的东西和踩过的坑。
+结论见 [m5-conclusion.md](m5-conclusion.md)(定稿)。本文记录 M5 里做的设计决定、命令的用法和规则、量到的东西和踩过的坑。
 改 `tools/cli/` 或 `core/src/{demuxer,analyze}.*` 之前先读它;更早的决定见 [m1-notes.md](m1-notes.md) 到 [m4-notes.md](m4-notes.md)。
 
 ## 代码布局(M5 新增和改动)
