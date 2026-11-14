@@ -507,6 +507,27 @@ void Child::Terminate() {
 
 #endif
 
+bool OpenInBrowser(const std::string& url) {
+  // Only an address this tool made itself is ever passed here; still, hand nothing but http(s) to the shell.
+  if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) return false;
+#ifdef _WIN32
+  const HINSTANCE r = ShellExecuteW(nullptr, L"open", ToWide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  return reinterpret_cast<INT_PTR>(r) > 32;
+#elif defined(__ANDROID__)
+  return false;
+#else
+#ifdef __APPLE__
+  const char* opener = "open";
+#else
+  const char* opener = "xdg-open";
+#endif
+  Child child;
+  std::string error;
+  if (!child.Start({opener, url}, /*capture_stdout=*/false, &error)) return false;
+  return child.Wait() == 0;
+#endif
+}
+
 bool RunCapture(const std::vector<std::string>& argv, std::string* out, std::string* error) {
   Child child;
   if (!child.Start(argv, /*capture_stdout=*/true, error)) return false;

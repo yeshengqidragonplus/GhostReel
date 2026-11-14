@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlphaClip 预览</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <main id="stage">
+    <div id="viewport">
+      <canvas id="view"></canvas>
+      <div id="drop-hint" data-en="Drop a .webm here (with its .acmeta.json when it has one)">把 .webm 拖到这里(有同名的 .acmeta.json 就一起拖)</div>
+      <div id="message" hidden></div>
+    </div>
+    <div id="transport">
+      <button id="btn-prev" title="上一帧 (←)" data-en-title="Previous frame (←)">⏮</button>
+      <button id="btn-play" title="播放 / 暂停 (空格)" data-en-title="Play / pause (space)">▶</button>
+      <button id="btn-next" title="下一帧 (→)" data-en-title="Next frame (→)">⏭</button>
+      <input id="timeline" type="range" min="0" max="0" step="1" value="0">
+      <span id="time-label">–</span>
+    </div>
+    <div id="readout">&nbsp;</div>
+  </main>
+
+  <aside id="panel">
+    <section>
+      <h2 data-en="Clip">片子</h2>
+      <div class="row">
+        <button id="btn-open" data-en="Choose files…">选择文件…</button>
+        <span id="clip-name" class="grow muted" data-en="none">没有</span>
+      </div>
+      <div class="row">
+        <label><input id="opt-loop" type="checkbox" checked> <span data-en="Loop">循环</span></label>
+        <label class="grow right"><span data-en="Speed">速度</span>
+          <select id="opt-speed">
+            <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option><option value="2">2×</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <h2 data-en="Background">背景</h2>
+      <div class="row">
+        <label><input id="bg-checker" type="checkbox" checked> <span data-en="Checkerboard">棋盘格</span></label>
+        <input id="bg-color" type="color" value="#808080" class="right">
+      </div>
+      <div class="row swatches" id="bg-presets">
+        <button data-color="#ffffff" style="background:#ffffff" title="#ffffff"></button>
+        <button data-color="#808080" style="background:#808080" title="#808080"></button>
+        <button data-color="#000000" style="background:#000000" title="#000000"></button>
+        <button data-color="#00c8e6" style="background:#00c8e6" title="#00c8e6"></button>
+        <button data-color="#e63232" style="background:#e63232" title="#e63232"></button>
+        <button data-color="#32a050" style="background:#32a050" title="#32a050"></button>
+      </div>
+    </section>
+
+    <section>
+      <h2 data-en="View">显示</h2>
+      <div class="row"><label class="grow"><span data-en="Zoom">缩放</span>
+        <select id="opt-zoom">
+          <option value="fit" data-en="Fit">适应窗口</option>
+          <option value="0.25">25%</option><option value="0.5">50%</option>
+          <option value="1" selected>100%</option><option value="2">200%</option>
+          <option value="4">400%</option><option value="8">800%</option>
+        </select></label></div>
+      <div class="row"><label class="grow"><span data-en="Filter">缩放时的过滤</span>
+        <select id="opt-filter">
+          <option value="linear" data-en="Bilinear">双线性</option>
+          <option value="nearest" data-en="Nearest">最近点</option>
+        </select></label></div>
+      <div class="row"><label class="grow"><span data-en="Show">内容</span>
+        <select id="opt-viewmode">
+          <option value="0" data-en="Composite">合成结果</option>
+          <option value="1" data-en="Alpha only">只看 alpha</option>
+          <option value="2" data-en="Colour only (premultiplied)">只看颜色(预乘后)</option>
+        </select></label></div>
+      <div class="row"><label class="grow"><span data-en="Colour space">色彩空间</span>
+        <select id="opt-colorspace">
+          <option value="gamma">Gamma</option>
+          <option value="linear" data-en="Linear (as a Unity Linear project)">Linear(同 Unity Linear 工程)</option>
+        </select></label></div>
+      <div class="row"><label class="grow"><span data-en="Blending">混合方式</span>
+        <select id="opt-blend">
+          <option value="premultiplied" data-en="Premultiplied (correct)">预乘(正确)</option>
+          <option value="straight" data-en="Straight alpha (wrong, for comparison)">直通 alpha(错误,作对照)</option>
+        </select></label></div>
+    </section>
+
+    <section>
+      <h2 data-en="Sidecar (clip.acmeta.json)">sidecar(clip.acmeta.json)</h2>
+      <div class="row"><label><input id="meta-use" type="checkbox"> <span data-en="Use a sidecar (off: the core's auto mode)">使用 sidecar(不勾:核心的 auto 模式)</span></label></div>
+      <fieldset id="meta-fields">
+        <div class="row"><label class="grow"><span>alpha_mode</span>
+          <select id="meta-alpha-mode">
+            <option>opaque</option><option>packed_right</option><option>packed_bottom</option><option>native_alpha</option>
+          </select></label></div>
+        <div class="row"><label><input id="meta-premultiplied" type="checkbox"> <span>premultiplied</span></label>
+          <span class="muted grow right" data-en="colour in the file is already × alpha">文件里的颜色已乘过 alpha</span></div>
+        <div class="row"><label class="grow"><span>matrix</span>
+          <select id="meta-matrix">
+            <option value="" data-en="unspecified">未指定</option><option>bt601</option><option>bt709</option>
+          </select></label></div>
+        <div class="row"><label class="grow"><span>color_range</span>
+          <select id="meta-range">
+            <option value="" data-en="unspecified">未指定</option><option>limited</option><option>full</option>
+          </select></label></div>
+        <div class="row"><label class="grow"><span>content_size</span>
+          <span><input id="meta-content-w" type="number" min="1" max="8192" placeholder="auto"> ×
+          <input id="meta-content-h" type="number" min="1" max="8192" placeholder="auto"></span></label></div>
+        <div class="row"><label><input id="meta-loop-hint" type="checkbox"> <span>loop_hint</span></label></div>
+      </fieldset>
+      <div id="meta-error" class="error" hidden></div>
+      <pre id="meta-json"></pre>
+      <div class="row">
+        <button id="meta-copy" data-en="Copy">复制</button>
+        <button id="meta-download" data-en="Download">下载</button>
+        <button id="meta-reset" class="right" data-en="Revert">还原</button>
+      </div>
+    </section>
+
+    <section>
+      <h2 data-en="When the sidecar does not say">sidecar 没写时用的默认值</h2>
+      <div class="row"><label class="grow"><span data-en="Matrix">矩阵</span>
+        <select id="def-matrix"><option value="bt709" selected>BT.709</option><option value="bt601">BT.601</option></select></label></div>
+      <div class="row"><label class="grow"><span data-en="Range">范围</span>
+        <select id="def-range"><option value="limited" selected>limited</option><option value="full">full</option></select></label></div>
+      <div class="row"><label class="grow"><span data-en="Chroma position">色度位置</span>
+        <select id="def-siting">
+          <option value="left" selected data-en="Left (video default)">左对齐(视频的默认)</option>
+          <option value="center" data-en="Centre">居中</option>
+        </select></label></div>
+    </section>
+
+    <section>
+      <h2 data-en="File (alphaclip inspect)">文件信息(alphaclip inspect)</h2>
+      <pre id="inspect"></pre>
+    </section>
+  </aside>
+</div>
+<input id="file-input" type="file" multiple accept=".webm,.json" hidden>
+<script type="module" src="app.js"></script>
+</body>
+</html>

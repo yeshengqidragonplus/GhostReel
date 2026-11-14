@@ -33,6 +33,16 @@ namespace AlphaClip.Tests
                 "ground truth: " + AlphaClipTruth.Frames.Length + " frames of " + AlphaClipTruth.Width + "x" + AlphaClipTruth.Height + " RGBA", truth.Length.ToString());
 
             var backgrounds = new[] { new Color32(255, 255, 255, 255), new Color32(128, 128, 128, 255), new Color32(0, 200, 230, 255) };
+            // -acDumpDir <dir> (M6): everything drawn here is also written as raw RGBA, so that the WebGL preview can be
+            // compared with it pixel by pixel (core/tests/test_preview.py --unity-gamma / --unity-linear).
+            string dumpDir = BatchTests.Arg("-acDumpDir");
+            if (!string.IsNullOrEmpty(dumpDir))
+            {
+                Directory.CreateDirectory(dumpDir);
+                File.WriteAllText(Path.Combine(dumpDir, "info.txt"),
+                    "colour space: " + QualitySettings.activeColorSpace + "\npipeline: " + BatchTests.ActivePipeline() + "\nunity: " + Application.unityVersion +
+                    "\ngraphics: " + SystemInfo.graphicsDeviceName + " (" + SystemInfo.graphicsDeviceType + ")\n");
+            }
             Material scene = AlphaClipMaterials.CreateUnlit();
             Shader straightShader = Shader.Find("Unlit/Transparent");
             Check(straightShader != null, "the straight-alpha control shader Unlit/Transparent exists");
@@ -72,7 +82,14 @@ namespace AlphaClip.Tests
                             {
                                 Check(AlphaClipTruth.ShowFrame(player, AlphaClipTruth.Frames[f]), name + ": frame " + AlphaClipTruth.Frames[f] + " is shown after a seek",
                                     "last pts " + player.LastPtsUs);
-                                all.Add(AlphaClipTruth.Measure(RenderComposite(player.Output, scene, bg), truth, f, bg));
+                                byte[] composite = RenderComposite(player.Output, scene, bg);
+                                all.Add(AlphaClipTruth.Measure(composite, truth, f, bg));
+                                string tag = DumpTag(clip, f) + ".bg" + bg.r + "_" + bg.g + "_" + bg.b;
+                                Dump(dumpDir, tag + ".scene", composite, player.Output.width, player.Output.height);
+                                if (bg.Equals(backgrounds[0]))
+                                {
+                                    Dump(dumpDir, tag + ".output", ReadBack(player.Output), player.Output.width, player.Output.height);
+                                }
                             }
                             Report.AppendLine("INFO  " + name + " over (" + bg.r + "," + bg.g + "," + bg.b + ") [" + space + "]: mean |error| " +
                                               all.MeanAbs.ToString("F3") + ", max " + all.Max + ", soft-edge signed mean " + all.EdgeMean.ToString("F3") +
@@ -88,7 +105,9 @@ namespace AlphaClip.Tests
                         for (int f = 0; f < AlphaClipTruth.Frames.Length; f++)
                         {
                             AlphaClipTruth.ShowFrame(player, AlphaClipTruth.Frames[f]);
-                            control.Add(AlphaClipTruth.Measure(RenderComposite(player.Output, straightControl, backgrounds[0]), truth, f, backgrounds[0]));
+                            byte[] composite = RenderComposite(player.Output, straightControl, backgrounds[0]);
+                            control.Add(AlphaClipTruth.Measure(composite, truth, f, backgrounds[0]));
+                            Dump(dumpDir, DumpTag(clip, f) + ".straight.scene", composite, player.Output.width, player.Output.height);
                         }
                         Report.AppendLine("INFO  " + name + " CONTROL straight-alpha shader over white: soft-edge signed mean " + control.EdgeMean.ToString("F2"));
                         Check(control.EdgeMean < -MinControlEdgeMean,
@@ -110,7 +129,10 @@ namespace AlphaClip.Tests
                         for (int f = 0; f < AlphaClipTruth.Frames.Length; f++)
                         {
                             AlphaClipTruth.ShowFrame(wrong, AlphaClipTruth.Frames[f]);
-                            control.Add(AlphaClipTruth.Measure(RenderComposite(wrong.Output, scene, backgrounds[0]), truth, f, backgrounds[0]));
+                            byte[] composite = RenderComposite(wrong.Output, scene, backgrounds[0]);
+                            control.Add(AlphaClipTruth.Measure(composite, truth, f, backgrounds[0]));
+                            Dump(dumpDir, DumpTag(clip, f) + ".flag.scene", composite, wrong.Output.width, wrong.Output.height);
+                            Dump(dumpDir, DumpTag(clip, f) + ".flag.output", ReadBack(wrong.Output), wrong.Output.width, wrong.Output.height);
                         }
                         Report.AppendLine("INFO  " + name + " CONTROL wrong premultiplied flag over white: soft-edge signed mean " + control.EdgeMean.ToString("F2"));
                         Check(Math.Abs(control.EdgeMean) > MinControlEdgeMean,
@@ -171,6 +193,27 @@ namespace AlphaClip.Tests
                   AlphaClipPlayer.SidecarUri("http://h.example/dir.v2/clip.webm?token=1#x") == "http://h.example/dir.v2/clip.acmeta.json?token=1#x" &&
                   AlphaClipPlayer.SidecarUri("C:\\clips\\noext") == "C:\\clips\\noext.acmeta.json",
                 "the sidecar URI replaces the extension of the last path segment and keeps a query string");
+        }
+
+        /// <summary>"clip.f20" for the third truth frame of clip.webm: the first parts of a dump file's name.</summary>
+        private static string DumpTag(string clip, int truthFrame)
+        {
+            return Path.GetFileNameWithoutExtension(clip) + ".f" + AlphaClipTruth.Frames[truthFrame];
+        }
+
+        /// <summary>Writes a readback (rows bottom first) as raw RGBA with the TOP row first; nothing without -acDumpDir.</summary>
+        private static void Dump(string dir, string name, byte[] rgbaBottomFirst, int w, int h)
+        {
+            if (string.IsNullOrEmpty(dir))
+            {
+                return;
+            }
+            var topFirst = new byte[w * h * 4];
+            for (int r = 0; r < h; r++)
+            {
+                Buffer.BlockCopy(rgbaBottomFirst, (h - 1 - r) * w * 4, topFirst, r * w * 4, w * 4);
+            }
+            File.WriteAllBytes(Path.Combine(dir, name + ".rgba"), topFirst);
         }
 
         private static AlphaClipPlayer NewAlphaPlayer(string clip, string metaJson)

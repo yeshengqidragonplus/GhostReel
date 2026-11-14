@@ -13,7 +13,8 @@
 # With -PlayClip <clip.webm> the play-mode tests run instead (the real component lifecycle, Update-driven
 # playback, OnDestroy): the editor enters play mode, so it is started without -quit and the test driver exits it.
 # With -Demo the demo scene is (re)created from the menu code and played for a moment; -SnapshotDir <dir> makes the
-# tests save what they rendered as PNG files there.
+# tests save what they rendered as PNG files there. -DumpDir <dir> (with -AlphaClips) writes every picture the
+# transparency tests draw as raw RGBA, rows top first, for the comparison with the WebGL preview (M6).
 # -OfflineGuard starts the editor with a dead HTTP(S) proxy: if the package manager wanted to download something it
 # fails (visible in the log) instead of fetching. Use it whenever nothing may be downloaded.
 # Exit code: 0 all checks passed, 1 a check failed, 2 an exception, 3 the editor did not finish.
@@ -29,7 +30,8 @@ param(
   [switch]$Demo,
   [switch]$OfflineGuard,
   [string]$SnapshotDir = '',
-  [string]$Method = 'AlphaClip.Tests.EditModeTests.Run',
+  [string]$DumpDir = '',      # M6: the transparency tests also write what they drew as raw RGBA here (for core/tests/test_preview.py)
+  [string]$Method ='AlphaClip.Tests.EditModeTests.Run',
   [string]$WorkDir = $env:TEMP,
   [int]$TimeoutMinutes = 9
 )
@@ -85,6 +87,7 @@ Remove-Item $report -ErrorAction SilentlyContinue
 $log = Join-Path $WorkDir 'unity_tests.log'
 $extra = @('-acExpectPipeline', $Pipeline)
 if ($SnapshotDir) { New-Item -ItemType Directory -Force $SnapshotDir | Out-Null; $extra += @('-acSnapshotDir', "`"$SnapshotDir`"") }
+if ($DumpDir) { New-Item -ItemType Directory -Force $DumpDir | Out-Null; $extra += @('-acDumpDir', "`"$DumpDir`"") }
 if ($AlphaClips) { $extra += @('-acAlphaClips', "`"$AlphaClips`"") }
 if ($Truth) { $extra += @('-acTruth', "`"$Truth`"") }
 if ($Demo) {

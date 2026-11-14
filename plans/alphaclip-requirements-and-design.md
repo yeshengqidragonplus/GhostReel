@@ -1,6 +1,6 @@
 # AlphaClip(暂定名)— 跨引擎透明视频插件:需求与设计方案
 
-- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md);M2 完成后在 §9.1、§11、§13 补了「M2」标注,见 [M2 结论](../docs/m2-conclusion.md);M3 完成后在 §3、§9.1、§11、§13 补了「M3」标注,见 [M3 结论](../docs/m3-conclusion.md);M4 完成后在 §6.3、§7.2、§8.2、§9.1、§11、§13.1 补了「M4」标注,见 [M4 结论](../docs/m4-conclusion.md);M5 完成后在 §3.3、§11、§13.1 补了「M5」标注,见 [M5 结论](../docs/m5-conclusion.md))
+- 状态:**草案 v0.2**(v0.1 于 2026-11-04;v0.2 于 2026-11-05 按 [M0 结论](../docs/m0-conclusion.md)修订,改动处都标了「M0」;M1 完成后又在 §7.2、§11、§13.1 补了「M1」标注,见 [M1 结论](../docs/m1-conclusion.md);M2 完成后在 §9.1、§11、§13 补了「M2」标注,见 [M2 结论](../docs/m2-conclusion.md);M3 完成后在 §3、§9.1、§11、§13 补了「M3」标注,见 [M3 结论](../docs/m3-conclusion.md);M4 完成后在 §6.3、§7.2、§8.2、§9.1、§11、§13.1 补了「M4」标注,见 [M4 结论](../docs/m4-conclusion.md);M5 完成后在 §3.3、§11、§13.1 补了「M5」标注,见 [M5 结论](../docs/m5-conclusion.md);M6 实现后在 §3.3、§8.3、§11、§13.1、附录 B 补了「M6」标注,见 [M6 结论(草稿)](../docs/m6-conclusion.md))
 - 用途:作为新项目的起点文档。新项目里把本文件放进 `docs/`,让 Claude 先读它再动手。
 - 开发节奏:**小步慢做,每个里程碑独立可验证、可随时暂停**(见第 11 节)。
 - 范围:一套 C++ 核心 + Unity / Godot 4 / Cocos Creator 3.x 三个薄绑定 + 离线制作工具。
@@ -86,6 +86,10 @@
 
 > **M5(2026-11-06 实现,2026-11-10 定稿):** TR-1 到 TR-3 已在 `alphaclip.exe` 里实现(`encode` / `inspect` / `verify`,C++,见 `docs/m5-notes.md`)。与上面的需求的差异:① `encode` 调用**外部 ffmpeg**(libvpx-vp9;GPL,所以只当程序启动,不链接、不随包发行),输入是视频文件或 PNG 序列;
 > ② 颜色默认**预乘**(`--straight` 保持原样,没有扩边);③ `encode` 写出之前先跑 `verify`;④ `verify` 除了"与参考输出逐帧比对"(对 ffmpeg 逐字节)还查时间戳、两路关键帧是否对齐、Cues、seek、alpha 合理性;没有做对源素材的 PSNR。
+>
+> **M6(2026-11-15,结论为草稿):** TR-4 做成了 `alphaclip preview [clip.webm]`(见 `docs/m6-notes.md`):exe 里起一个只监听 127.0.0.1 的小服务,用原生核心解码,
+> 页面(WebGL2,嵌在 exe 里)按引擎的两步画出来。可以拖入文件、切换背景色和棋盘格、缩放、切 Gamma / Linear、改 sidecar 的字段并导出;
+> "调参数"目前只有 sidecar 的字段和默认的矩阵 / 范围 / 色度位置,抠图和边缘参数要等 M7。与"本地预览页"的字面差异:页面离不开 exe(没有做 WebAssembly 核心)。
 
 ## 4. 总体架构
 
@@ -268,6 +272,10 @@ void ac_close(ac_player*);
 - 用一个小生成脚本产出:Unity ShaderLab(HLSL)、Godot Shading Language、Cocos `.effect`、预览页的 WebGL 版本。
 - 每个引擎里都有"渲染一张固定测试图并和参考图比对"的黄金图测试(第 10 节),防止漂移。
 
+> **M6:** 主源已经有了:`shaders/alphaclip_yuv_to_rgba.frag.glsl`(第 8.2 节的第 1–3 项),预览页原样使用它(WebGL2 就是 GLSL ES 3.0,不需要生成)。
+> **生成脚本还没有做**,Unity 的 `YuvToRgb.shader` 仍是 M4 手写的那份;两份现在靠测试对齐:`core/tests/test_preview.py` 把预览页画的和 Unity 画的逐像素比,
+> 同一块显卡上着色器输出逐字节相同。生成脚本留到做 Godot / Cocos 之前。
+
 ### 8.4 `keyed` 模式的查找表采样
 
 - 查找表是 32×32×32 的 3D 表,排成 1024×32 的横条图。
@@ -355,7 +363,7 @@ void ac_close(ac_player*);
 | **M3 Android 真机** ✅ | 同一套代码在 Pixel 6a 上播放;记录性能基线 | 真机播放正确,基线数据入库。**已完成(2026-11-06),结论见 `docs/m3-conclusion.md`**(Unity 2022.3.62f2 开发构建,Pixel 6a / Android 15;画面与 Windows 编辑器最大差 1,丢帧 0,基线未固定核;Unity 6 上的 Android、AAB / Play 16 KB 检查、16 KB 页设备、固定核基线未做) |
 | **M4 透明(基础)** ✅ | `packed_right`/`packed_bottom` + `native_alpha`,预乘输出 | 在 UI 和场景里叠加无黑边。**已完成(2026-11-06),结论见 `docs/m4-conclusion.md`**(Windows 编辑器,2022.3.62f2,内置管线和 URP,Gamma 和 Linear,场景和 UI 两条路径,对精确真值带负向对照;Pixel 6a 上的 M4、Unity 6、HDRP、`keyed`、边缘后处理、"直通色 + 透明处填黑"的素材未做) |
 | **M5 制作工具** ✅ | `encode` / `inspect` / `verify` 命令行 | 一条命令把素材变成可播放的包。**已完成(2026-11-06 实现并验证,2026-11-10 定稿),结论见 `docs/m5-conclusion.md`**(Windows;外部 ffmpeg 编码,颜色默认预乘;`test_authoring.py` 181 项、3600 例变异、工具生成的四个片子过了 M4 的 Unity 矩阵 151/151 × 2;Pixel 6a、Unity 6 / URP / HDRP 上用工具生成的片子、真实素材、1080p 和编码速度、消毒器运行、自带编码器、扩边未做) |
-| **M6 预览页** | 本地 WebGL 预览,和 Unity 渲染对比 | 预览与引擎结果肉眼一致 |
+| **M6 预览页** ✅(草稿) | 本地 WebGL 预览,和 Unity 渲染对比 | 预览与引擎结果肉眼一致。**已实现并在 Windows 上验证(2026-11-15,结论是草稿,见 `docs/m6-conclusion.md`)**(`alphaclip preview`:exe 里的本地服务用原生核心解码,WebGL2 页面用着色器主源画;`test_preview.py` 177 项在 Chrome 156 / Edge 157 上通过;与 Unity 2022.3.62f2 内置管线在同一块显卡上着色器输出逐字节相同、合成最多差 1 级,Gamma 和 Linear;"肉眼"还要用户自己看;其他浏览器、URP / UI 路径 / Unity 6 / 真机上的对比、真实素材、性能、着色器生成脚本未做) |
 | **M7 边缘与 keyed** | 边缘后处理;绿幕 + 查找表抠图与生成器 | 质量指标达标,有对比图 |
 | **M8 Godot** | GDExtension,`VideoStreamPlayer` 可用 | 示例场景里播放透明视频 |
 | **M9 Cocos** | 原生扩展 + TS 组件 | 示例工程里播放透明视频 |
@@ -382,7 +390,7 @@ void ac_close(ac_player*);
 | R4 | 三个引擎的纹理上传接口细节和版本差异 | 每个引擎只做薄层;API 名称实现时核对官方文档 |
 | R5 | Android 16 KB 页大小等平台新要求 | M3 时按 Google 官方最新文档核对并用对应 NDK 构建。**M0:** NDK r30 默认 16 KB 对齐(已验证 ELF 段对齐);APK 内 zip 对齐和 Play 检查留到 M3;Unity 2022.3 需 ≥ 2022.3.56f1 且 Burst ≥ 1.8.21。**M3:** ELF 层已验证(`.so` 与 APK 里 Unity 自己的库都是 0x4000);zip 对齐只在压缩存放的开发 APK 上通过,AAB / Play Console 检查未做 |
 | R6 | `keyed` 抠图质量上限不明 | 放在 M7,先用并排/原生 alpha 打通主链路 |
-| R7 | 着色器多端生成产生漂移 | 黄金图测试 + 单一主源 |
+| R7 | 着色器多端生成产生漂移 | 黄金图测试 + 单一主源。**M6:** 现在有两份手写的实现(GLSL 主源给预览页,Unity 的 HLSL),还没有生成脚本,所以漂移的风险是真实存在的;挡住它的是 `test_preview.py` 的对比(同一块显卡上逐字节相同)——改任何一份都要两份一起改并重跑。另外量到:Linear 下不同显卡之间在接近黑色处本来就差 2–3 级(与实现无关),跨显卡的黄金图不能按最大差来判 |
 | R8 | 多实例同时解码导致卡顿 | 全局并发上限与降级策略(FR-10) |
 | R9 | WebM 无 Cues 时 seek 慢或失败 | 制作工具强制写入 Cues;`verify` 检查。**M1:** 核心打开时扫描整个文件建完整的包索引,seek 不依赖 Cues,此风险对核心不成立;Cues 仍有意义(其他播放器、以后从磁盘流式读取)。**M5:** `encode` 用的 ffmpeg 默认写 Cues,`verify` 检查它们存在、每个 Cue 的簇位置 / 时间 / 相对位置都对得上包、且指向两路都是关键帧的包,没有 Cues 算失败 |
 | R10 | `native_alpha` 的彩色流与 alpha 流关键帧不对齐(如场景切换),seek 后 alpha 无法解码(M0 新增) | M5 的 `verify` 检查"每个 Cues 指向的块,两路都是关键帧";M0 样本是固定 GOP,错位情况未测。**M5:** `encode` 固定 GOP(`-g N -keyint_min N`)让两路关键帧在同样的位置;`verify` 做了上面的检查和"有的包只在一路是关键帧"的警告;用测试里手工拼的 WebM(颜色每 30 帧、alpha 每 20 帧一个关键帧)得到了真实样本:Cue 指向的包只在颜色流是关键帧 → `verify` FAIL,核心仍解码正确、seek 退回到两路都是关键帧的点(只有第 0 帧时就从头解码),与 ffmpeg 一致。编码器自己因场景切换插入关键帧的素材没有构造过 |
@@ -445,6 +453,8 @@ alphaclip/
 > **实际进展(2026-11-06,M3 之后):** 已建的有 `docs/`(M0–M3 的结论、笔记和 M3 的设备基准数据)、`core/{include,src,scripts,tests}`、`core/third_party/{libvpx,libwebm}`(git 子模块)、
 > `core/spikes/`(M0 的一次性代码,不在上图里)、`tools/cli`、`bindings/unity/{package,TestProject,scripts}`、`samples/{m0,m1}`。**本文档本身仍在 `plans/`,没有移进 `docs/`**
 > (CLAUDE.md 和各结论文档都按 `plans/` 引用它,要移的话要一起改链接)。还没建的有 `shaders/`、`bindings/{godot,cocos}`、`tools/preview`。构建产物在 `build/`(git 忽略)。
+>
+> **M6 之后(2026-11-15):** `shaders/`(只有着色器主源,没有生成脚本)和 `tools/preview/www`(预览页)已建;`docs/` 里现在有 M0–M6 的结论和 M1–M6 的笔记,`samples/` 多了 `m4`。还没建的只剩 `bindings/{godot,cocos}`。
 
 ## 附录 C:本机环境(2026-11-04 初稿,2026-11-05 按 M0 更新,2026-11-06 按 M3 更新)
 

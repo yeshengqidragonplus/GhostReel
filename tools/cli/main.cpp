@@ -1,9 +1,11 @@
 // alphaclip: command-line tool for the core library. M1: info / decode / play (developer tools); M4: --meta; M5: the
-// authoring commands encode / inspect / verify (inspect.cpp, verify.cpp, encode.cpp; see their headers).
+// authoring commands encode / inspect / verify (inspect.cpp, verify.cpp, encode.cpp; see their headers); M6: preview
+// (preview.cpp, http_server.cpp).
 //
 //   alphaclip encode <input> --out <clip.webm> [...]       footage -> clip.webm + clip.acmeta.json, then verify
 //   alphaclip inspect <clip.webm>                          what is in the file and how the core reads it
 //   alphaclip verify  <clip.webm>                          is the clip fit to ship (exit code 0 / 1)
+//   alphaclip preview [<clip.webm>]                        the clip in the browser, drawn as an engine draws it
 //
 //   alphaclip info   <clip.webm> [--meta <clip.acmeta.json>]
 //   alphaclip decode <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]
@@ -59,6 +61,7 @@ int Usage() {
                "                    [--no-verify] [--quiet] [--verbose]\n"
                "  alphaclip inspect <clip.webm> [--meta <clip.acmeta.json> | --no-meta]\n"
                "  alphaclip verify  <clip.webm> [--meta <clip.acmeta.json> | --no-meta] [--ffmpeg <file or folder> | --no-ffmpeg]\n"
+               "  alphaclip preview [<clip.webm>] [--meta <clip.acmeta.json> | --no-meta] [--port N] [--no-open]\n"
                "  alphaclip info    <clip.webm> [--meta <clip.acmeta.json>]\n"
                "  alphaclip decode  <clip.webm> --out <raw.yuv> [--seek-us N] [--frames N] [--meta <json>]\n"
                "  alphaclip play    <clip.webm> --out <raw.yuv> [--meta <json>] [--clock-step-us N] [--depth N]\n"
@@ -443,5 +446,6 @@ int main(int argc, char** argv) {
   if (argc >= 3 && std::strcmp(argv[1], "inspect") == 0) return cli::CmdInspect(argc, argv);
   if (argc >= 3 && std::strcmp(argv[1], "verify") == 0) return cli::CmdVerify(argc, argv);
   if (argc >= 3 && std::strcmp(argv[1], "encode") == 0) return cli::CmdEncode(argc, argv);
+  if (argc >= 2 && std::strcmp(argv[1], "preview") == 0) return cli::CmdPreview(argc, argv);
   return Usage();
 }

@@ -61,6 +61,9 @@ class Child {
   std::unique_ptr<Impl> impl_;
 };
 
+// Opens an http:// address in the user's default browser. False when no browser could be started.
+bool OpenInBrowser(const std::string& url);
+
 // Runs a program to completion and returns everything it wrote to stdout. False when it cannot be started or exits
 // with a non-zero code (`error` then says why).
 bool RunCapture(const std::vector<std::string>& argv, std::string* out, std::string* error);

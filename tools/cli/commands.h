@@ -1,7 +1,9 @@
-// The authoring commands of the command-line tool (M5): inspect, verify, encode.
+// The authoring commands of the command-line tool: inspect, verify, encode (M5) and preview (M6).
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace cli {
 
@@ -12,6 +14,13 @@ int Usage();
 int CmdInspect(int argc, char** argv);
 int CmdVerify(int argc, char** argv);
 int CmdEncode(int argc, char** argv);
+int CmdPreview(int argc, char** argv);
+
+// The `inspect` report ("key: value" lines) of a clip held in memory. `file_label` is printed as the file,
+// `meta_text` is the sidecar ("" for none) and `meta_desc` says where it came from. False when the bytes cannot be
+// read as WebM; `out` then holds the reason.
+bool InspectReport(const std::vector<uint8_t>& data, const std::string& file_label, const std::string& meta_text,
+                   const std::string& meta_desc, std::string* out);
 
 struct VerifyOptions {
   std::string clip_path;
