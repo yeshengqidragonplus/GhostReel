@@ -1,7 +1,7 @@
 # M6 笔记
 
 M6 = 预览页:本地 WebGL 预览,和 Unity 渲染对比(设计文档 §3.3 的 TR-4、§11),完成标准"预览与引擎结果肉眼一致"。
-结论见 [m6-conclusion.md](m6-conclusion.md)(草稿)。本文记录 M6 里做的设计决定、用法、接口、测试方法和踩过的坑。
+结论见 [m6-conclusion.md](m6-conclusion.md)(定稿)。本文记录 M6 里做的设计决定、用法、接口、测试方法和踩过的坑。
 改 `tools/preview/`、`shaders/`、`tools/cli/{preview,http_server}.*` 之前先读它;更早的决定见 [m1-notes.md](m1-notes.md) 到 [m5-notes.md](m5-notes.md)。
 
 ## 代码布局(M6 新增和改动)
